@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { Clock, Calendar, Users, Trash2, CheckCircle, XCircle, Loader, Edit2, Save, X } from 'lucide-react';
+import { Clock, Calendar, Users, Trash2, CheckCircle, XCircle, Loader, Edit2, Save, X, ChevronDown, ChevronUp } from 'lucide-react';
 import dayjs from 'dayjs';
 import relativeTime from 'dayjs/plugin/relativeTime';
 import { getAllReservations, deleteReservation, updateReservation, connectWebSocket } from '../api/client';
@@ -17,6 +17,7 @@ export default function Dashboard({ refreshTrigger }: Props) {
   const [editingId, setEditingId] = useState<string | null>(null);
   const [editStart, setEditStart] = useState('');
   const [editEnd, setEditEnd] = useState('');
+  const [expandedLogs, setExpandedLogs] = useState<Record<string, boolean>>({});
 
   useEffect(() => {
     loadReservations();
@@ -73,6 +74,21 @@ export default function Dashboard({ refreshTrigger }: Props) {
     setEditingId(null);
     setEditStart('');
     setEditEnd('');
+  };
+
+  const toggleLogExpanded = (id: string) => {
+    setExpandedLogs(prev => ({ ...prev, [id]: !prev[id] }));
+  };
+
+  const getActionColor = (action: string) => {
+    switch (action) {
+      case 'found_slot': return 'bg-blue-100 text-blue-700 border-blue-200';
+      case 'getting_book_token': return 'bg-purple-100 text-purple-700 border-purple-200';
+      case 'booking': return 'bg-yellow-100 text-yellow-700 border-yellow-200';
+      case 'success': return 'bg-green-100 text-green-700 border-green-200';
+      case 'error': return 'bg-red-100 text-red-700 border-red-200';
+      default: return 'bg-gray-100 text-gray-700 border-gray-200';
+    }
   };
 
   const handleSaveEdit = async (id: string) => {
@@ -321,6 +337,54 @@ export default function Dashboard({ refreshTrigger }: Props) {
                   </div>
                 )}
               </div>
+
+              {/* Booking Attempts Log */}
+              {reservation.bookingAttempts && reservation.bookingAttempts.length > 0 && (
+                <div className="mt-3 border-t border-gray-200 pt-3">
+                  <button
+                    onClick={() => toggleLogExpanded(reservation.id)}
+                    className="flex items-center gap-2 text-sm text-gray-600 hover:text-gray-800 transition-colors"
+                  >
+                    {expandedLogs[reservation.id] ? <ChevronUp size={16} /> : <ChevronDown size={16} />}
+                    <span className="font-medium">
+                      Booking Attempts Log ({reservation.bookingAttempts.length})
+                    </span>
+                  </button>
+                  
+                  {expandedLogs[reservation.id] && (
+                    <div className="mt-2 space-y-2 max-h-96 overflow-y-auto">
+                      {[...reservation.bookingAttempts].reverse().map((attempt, idx) => (
+                        <div key={idx} className="text-xs border rounded-lg p-2">
+                          <div className="flex items-center justify-between mb-1">
+                            <span className={`px-2 py-0.5 rounded border font-medium ${getActionColor(attempt.action)}`}>
+                              {attempt.action}
+                            </span>
+                            <span className="text-gray-500">
+                              {dayjs(attempt.timestamp).format('MMM D, h:mm:ss A')}
+                            </span>
+                          </div>
+                          <div className="text-gray-700">{attempt.message}</div>
+                          {attempt.slotTime && (
+                            <div className="text-gray-500 mt-1">
+                              Time: {attempt.slotTime} {attempt.slotDate && `on ${attempt.slotDate}`}
+                            </div>
+                          )}
+                          {attempt.details && (
+                            <details className="mt-1">
+                              <summary className="text-gray-500 cursor-pointer hover:text-gray-700">
+                                View details
+                              </summary>
+                              <pre className="mt-1 p-2 bg-gray-50 rounded text-xs overflow-x-auto">
+                                {JSON.stringify(attempt.details, null, 2)}
+                              </pre>
+                            </details>
+                          )}
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              )}
 
               {reservation.status !== 'booked' && (
                 <button

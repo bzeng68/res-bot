@@ -1,6 +1,6 @@
 import fs from 'fs';
 import path from 'path';
-import { ReservationRequest, ReservationStatus, BookingAttempt } from '../../shared/src/types.js';
+import { ReservationRequest, ReservationStatus, BookingAttempt, PlatformCredentials } from '../../shared/src/types.js';
 import { encryptPassword, decryptPassword, isEncrypted } from './utils/crypto.js';
 
 const DATA_DIR = process.env.DATA_DIR || './data';
@@ -47,8 +47,7 @@ export function createReservation(reservation: ReservationRequest): void {
     ...reservation,
     credentials: {
       ...reservation.credentials,
-      password: reservation.credentials.password ? encryptPassword(reservation.credentials.password) : undefined,
-      authToken: reservation.credentials.authToken ? encryptPassword(reservation.credentials.authToken) : undefined,
+      authToken: encryptPassword(reservation.credentials.authToken),
     },
   };
   
@@ -111,9 +110,7 @@ export function updateReservation(
   // If credentials are being updated, encrypt them
   if (updates.credentials) {
     reservation.credentials = {
-      ...reservation.credentials,
-      ...updates.credentials,
-      password: updates.credentials.password ? encryptPassword(updates.credentials.password) : reservation.credentials.password,
+      platform: 'resy',
       authToken: updates.credentials.authToken ? encryptPassword(updates.credentials.authToken) : reservation.credentials.authToken,
     };
   }
@@ -150,16 +147,16 @@ export function addBookingAttempt(
 // Helper function to decrypt credentials when reading
 function decryptReservationCredentials(reservation: ReservationRequest): ReservationRequest {
   try {
-    const decryptedCredentials = { ...reservation.credentials };
-    
-    // Decrypt password if present and encrypted
-    if (reservation.credentials.password && isEncrypted(reservation.credentials.password)) {
-      decryptedCredentials.password = decryptPassword(reservation.credentials.password);
-    }
+    const decryptedCredentials: PlatformCredentials = {
+      platform: 'resy',
+      authToken: '',
+    };
     
     // Decrypt authToken if present and encrypted
     if (reservation.credentials.authToken && isEncrypted(reservation.credentials.authToken)) {
       decryptedCredentials.authToken = decryptPassword(reservation.credentials.authToken);
+    } else {
+      decryptedCredentials.authToken = reservation.credentials.authToken;
     }
     
     return {

@@ -4,6 +4,7 @@ build/
 .env
 .env.local
 data/
+logs/
 *.log
 .DS_Store
 coverage/

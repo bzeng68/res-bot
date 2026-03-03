@@ -1,11 +1,10 @@
 import { Router } from 'express';
 import { searchRestaurants as searchResy } from '../api/resy-client.js';
-import { searchRestaurants as searchOpenTable } from '../api/opentable-client.js';
 import type { ApiResponse, SearchResult } from '../../../shared/src/types.js';
 
 const router = Router();
 
-// Search restaurants across both Resy and OpenTable
+// Search restaurants on Resy
 router.get('/search', async (req, res) => {
   try {
     const { query, location } = req.query;
@@ -18,20 +17,11 @@ router.get('/search', async (req, res) => {
       return;
     }
     
-    // Query both platforms in parallel
-    const [resyResults, openTableResults] = await Promise.allSettled([
-      searchResy(query as string, location as string),
-      searchOpenTable(query as string, location as string),
-    ]);
-    
-    // Combine results from both platforms
-    const restaurants = [
-      ...(resyResults.status === 'fulfilled' ? resyResults.value.restaurants : []),
-      ...(openTableResults.status === 'fulfilled' ? openTableResults.value.restaurants : []),
-    ];
+    // Query Resy
+    const resyResults = await searchResy(query as string, location as string);
     
     const combinedResults: SearchResult = {
-      restaurants,
+      restaurants: resyResults.restaurants,
       query: query as string,
     };
     

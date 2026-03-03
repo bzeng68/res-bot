@@ -55,19 +55,6 @@ export async function deleteReservation(id: string): Promise<void> {
   await client.delete(`/reservations/${id}`);
 }
 
-// Resy authentication endpoints
-export async function requestResySmsCode(phoneNumber: string): Promise<void> {
-  await client.post('/auth/resy/request-code', { phoneNumber });
-}
-
-export async function verifyResySmsCode(phoneNumber: string, code: string): Promise<string> {
-  const response = await client.post<ApiResponse<{ authToken: string }>>('/auth/resy/verify-code', {
-    phoneNumber,
-    code,
-  });
-  return response.data.data!.authToken;
-}
-
 // WebSocket connection
 export function connectWebSocket(onMessage: (data: any) => void): WebSocket {
   const ws = new WebSocket('ws://localhost:3001');

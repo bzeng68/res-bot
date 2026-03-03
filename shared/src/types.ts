@@ -7,7 +7,7 @@ export interface Restaurant {
   address?: string;
   cuisine?: string;
   bookingWindow: BookingWindow;
-  platform: 'resy' | 'opentable';
+  platform: 'resy';
 }
 
 export interface BookingWindow {
@@ -46,10 +46,8 @@ export type ReservationStatus =
   | 'cancelled';
 
 export interface PlatformCredentials {
-  platform: 'resy' | 'opentable';
-  email?: string; // For OpenTable
-  password?: string; // For OpenTable - encrypted in storage
-  authToken?: string; // For Resy - manually extracted from browser, encrypted in storage
+  platform: 'resy';
+  authToken: string; // Manually extracted from browser, encrypted in storage
 }
 
 export interface BookingResult {
@@ -62,8 +60,8 @@ export interface BookingResult {
 
 export interface BookingAttempt {
   timestamp: string; // ISO timestamp
-  slotTime: string; // "12:00"
-  slotDate: string; // "2026-03-31"
+  slotTime?: string; // "12:00" (optional - not available for all actions)
+  slotDate?: string; // "2026-03-31" (optional - not available for all actions)
   action: 'found_slot' | 'getting_book_token' | 'booking' | 'success' | 'error';
   message: string;
   details?: any; // Additional context

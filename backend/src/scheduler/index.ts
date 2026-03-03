@@ -185,7 +185,7 @@ function startPollingJob(reservation: ReservationRequest) {
     } catch (error) {
       console.error(`Error polling for ${reservation.restaurantName}:`, error);
     }
-  }, 1500); // Poll every 1.5 seconds
+  }, 3000); // Poll every 3 seconds to avoid bot detection
   
   // Set a timeout to stop polling after 5 minutes
   const timeoutId = setTimeout(() => {
@@ -235,7 +235,8 @@ function broadcastUpdate(jobId: string, type: string, data: any) {
 export function stopJobForReservation(reservationId: string) {
   const job = activeJobs.get(reservationId);
   if (job) {
-    clearInterval(job);
+    clearInterval(job.pollInterval);
+    clearTimeout(job.timeoutId);
     activeJobs.delete(reservationId);
     console.log(`⏹️ Stopped polling job for reservation ${reservationId}`);
   }

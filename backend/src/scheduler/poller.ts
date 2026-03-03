@@ -1,6 +1,7 @@
 import dayjs from 'dayjs';
-import { getAvailability, bookReservation } from '../api/resy-client.js';
+import { getAvailability } from '../api/resy-client.js';
 import { addBookingAttempt } from '../database.js';
+import { sendToExtension } from '../index.js';
 import type { ReservationRequest, BookingResult, AvailableSlot } from '../../../shared/src/types.js';
 
 /**
@@ -88,11 +89,44 @@ export async function pollForReservation(
       }
     });
     
-    const result = await bookReservation(
-      matchingSlot.slotId,
-      reservation.credentials,
-      reservation.id  // Pass reservation ID for logging
-    );
+    // Send booking request to Chrome Extension
+    const sent = sendToExtension({
+      type: 'BOOK_RESERVATION',
+      data: {
+        slotToken: matchingSlot.slotId,
+        reservationId: reservation.id,
+        partySize: matchingSlot.partySize,
+      },
+    });
+    
+    if (!sent) {
+      // Extension not connected
+      const errorMsg = 'Chrome Extension is not connected. Please make sure the extension is installed and running.';
+      console.error(`❌ ${errorMsg}`);
+      
+      addBookingAttempt(reservation.id, {
+        timestamp: new Date().toISOString(),
+        slotTime: matchingSlot.time,
+        slotDate: matchingSlot.date,
+        action: 'error',
+        message: errorMsg,
+        details: { error: 'Extension not connected' }
+      });
+      
+      return {
+        success: false,
+        error: errorMsg,
+      };
+    }
+    
+    // Booking request sent to extension - result will come via WebSocket
+    console.log('📤 Booking request sent to extension, waiting for response...');
+    
+    // Return pending status - actual result will be broadcast via WebSocket
+    const result: BookingResult = {
+      success: false,
+      error: 'Booking request sent to Chrome Extension - waiting for response'
+    };
     
     // Log the result
     if (result.success) {

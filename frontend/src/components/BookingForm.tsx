@@ -96,11 +96,6 @@ export default function BookingForm({ onSuccess }: Props) {
       }
     }
 
-    if (selectedRestaurant.platform === 'opentable' && (!email || !password)) {
-      alert('Please enter your OpenTable credentials');
-      return;
-    }
-
     setLoading(true);
     try {
       await createReservation({
@@ -111,11 +106,8 @@ export default function BookingForm({ onSuccess }: Props) {
         partySize,
         userEmail: email || 'user@resy.com',
         credentials: {
-          platform: selectedRestaurant.platform,
-          ...(selectedRestaurant.platform === 'resy' 
-            ? { authToken: resyAuthToken }
-            : { email, password }
-          ),
+          platform: 'resy',
+          authToken: resyAuthToken,
         },
       });
 
