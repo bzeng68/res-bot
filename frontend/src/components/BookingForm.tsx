@@ -1,42 +1,15 @@
-import { useState, useEffect } from 'react';
+import { useState, Fragment, useEffect } from 'react';
 import RestaurantSearch from './RestaurantSearch';
 import DateSelector from './DateSelector';
 import TimeSelector from './TimeSelector';
 import { createReservation } from '../api/client';
-import type { Restaurant, TimeRange } from '../../../shared/src/types';
+import type { Restaurant, TimeRange, BookingWindow } from '../../../shared/src/types';
+import dayjs from 'dayjs';
+import utc from 'dayjs/plugin/utc';
+import timezone from 'dayjs/plugin/timezone';
 
-const RESY_TOKEN_KEY = 'resy_auth_token';
-
-// Decode JWT to extract expiration
-function decodeJWT(token: string): { exp?: number } | null {
-  try {
-    const base64Url = token.split('.')[1];
-    const base64 = base64Url.replace(/-/g, '+').replace(/_/g, '/');
-    const jsonPayload = decodeURIComponent(
-      atob(base64)
-        .split('')
-        .map((c) => '%' + ('00' + c.charCodeAt(0).toString(16)).slice(-2))
-        .join('')
-    );
-    return JSON.parse(jsonPayload);
-  } catch (error) {
-    return null;
-  }
-}
-
-function getTokenExpiration(token: string): Date | null {
-  const decoded = decodeJWT(token);
-  if (decoded && decoded.exp) {
-    return new Date(decoded.exp * 1000);
-  }
-  return null;
-}
-
-function isTokenExpired(token: string): boolean {
-  const expiration = getTokenExpiration(token);
-  if (!expiration) return false;
-  return expiration.getTime() <= Date.now();
-}
+dayjs.extend(utc);
+dayjs.extend(timezone);
 
 interface Props {
   onSuccess: () => void;
@@ -52,48 +25,42 @@ export default function BookingForm({ onSuccess }: Props) {
     preferredTimes: [],
   });
   const [partySize, setPartySize] = useState(2);
-  const [email, setEmail] = useState('');
-  const [password, setPassword] = useState('');
-  const [resyAuthToken, setResyAuthToken] = useState('');
-  const [tokenExpiration, setTokenExpiration] = useState<Date | null>(null);
+  const [authToken, setAuthToken] = useState('');
   const [loading, setLoading] = useState(false);
+  
+  // Booking window state with defaults
+  const [bookingWindow, setBookingWindow] = useState<BookingWindow>({
+    daysInAdvance: 30,
+    releaseTime: '00:00', // Default to midnight
+    timezone: 'America/New_York',
+  });
+  const [showBookingWindowEdit, setShowBookingWindowEdit] = useState(false);
 
-  // Load saved token on mount
+  // Update booking window when restaurant is selected
   useEffect(() => {
-    const savedToken = localStorage.getItem(RESY_TOKEN_KEY);
-    if (savedToken) {
-      setResyAuthToken(savedToken);
-      setTokenExpiration(getTokenExpiration(savedToken));
+    if (selectedRestaurant) {
+      setBookingWindow(selectedRestaurant.bookingWindow);
     }
-  }, []);
+  }, [selectedRestaurant]);
 
-  // Update expiration when token changes
-  useEffect(() => {
-    if (resyAuthToken) {
-      setTokenExpiration(getTokenExpiration(resyAuthToken));
-      // Save to localStorage
-      localStorage.setItem(RESY_TOKEN_KEY, resyAuthToken);
-    } else {
-      setTokenExpiration(null);
-    }
-  }, [resyAuthToken]);
+  // Calculate when booking window opens
+  const getBookingWindowOpenTime = () => {
+    if (!selectedDate) return null;
+    
+    const targetDate = dayjs(selectedDate).tz(bookingWindow.timezone);
+    const [hours, minutes] = bookingWindow.releaseTime.split(':').map(Number);
+    
+    return targetDate
+      .subtract(bookingWindow.daysInAdvance, 'days')
+      .hour(hours)
+      .minute(minutes)
+      .second(0);
+  };
 
   const handleSubmit = async () => {
     if (!selectedRestaurant || !selectedDate) {
       alert('Please fill in all required fields');
       return;
-    }
-
-    // Validate platform-specific credentials
-    if (selectedRestaurant.platform === 'resy') {
-      if (!resyAuthToken) {
-        alert('Please enter your Resy auth token');
-        return;
-      }
-      if (isTokenExpired(resyAuthToken)) {
-        alert('Your Resy auth token has expired. Please get a new token from resy.com.');
-        return;
-      }
     }
 
     setLoading(true);
@@ -104,11 +71,12 @@ export default function BookingForm({ onSuccess }: Props) {
         targetDate: selectedDate.toISOString().split('T')[0],
         timeRange,
         partySize,
-        userEmail: email || 'user@resy.com',
+        userEmail: 'user@resy.com',
         credentials: {
           platform: 'resy',
-          authToken: resyAuthToken,
+          authToken: authToken.trim(),
         },
+        bookingWindow: bookingWindow,
       });
 
       alert('Reservation request created! The bot will attempt to book when slots open.');
@@ -118,9 +86,11 @@ export default function BookingForm({ onSuccess }: Props) {
       setStep(1);
       setSelectedRestaurant(null);
       setSelectedDate(null);
-      setEmail('');
-      setPassword('');
-      setResyAuthToken('');
+      setBookingWindow({
+        daysInAdvance: 30,
+        releaseTime: '00:00',
+        timezone: 'America/New_York',
+      });
     } catch (error) {
       console.error('Failed to create reservation:', error);
       alert('Failed to create reservation request');
@@ -132,11 +102,11 @@ export default function BookingForm({ onSuccess }: Props) {
   return (
     <div className="bg-gradient-to-br from-gray-50 to-gray-100 rounded-xl p-8 shadow-lg">
       {/* Progress steps */}
-      <div className="flex justify-between mb-8">
-        {[1, 2, 3, 4].map((s) => (
-          <div key={s} className="flex items-center flex-1">
+      <div className="flex items-center mb-8">
+        {[1, 2, 3].map((s, index) => (
+          <Fragment key={s}>
             <div
-              className={`w-10 h-10 rounded-full flex items-center justify-center font-semibold ${
+              className={`w-10 h-10 flex-shrink-0 rounded-full flex items-center justify-center font-semibold ${
                 s <= step
                   ? 'bg-primary-600 text-white'
                   : 'bg-gray-300 text-gray-600'
@@ -144,14 +114,14 @@ export default function BookingForm({ onSuccess }: Props) {
             >
               {s}
             </div>
-            {s < 4 && (
+            {index < 2 && (
               <div
                 className={`flex-1 h-1 mx-2 ${
                   s < step ? 'bg-primary-600' : 'bg-gray-300'
                 }`}
               />
             )}
-          </div>
+          </Fragment>
         ))}
       </div>
 
@@ -229,147 +199,121 @@ export default function BookingForm({ onSuccess }: Props) {
             </select>
           </div>
 
-          <button
-            onClick={() => setStep(4)}
-            disabled={!timeRange.start || !timeRange.end}
-            className="w-full py-3 bg-primary-600 text-white rounded-lg hover:bg-primary-700 disabled:opacity-50"
-          >
-            Continue →
-          </button>
-        </div>
-      )}
-
-      {/* Step 4: Credentials */}
-      {step === 4 && (
-        <div className="space-y-6">
-          <div className="flex items-center justify-between">
-            <h2 className="text-2xl font-bold text-gray-900">
-              {selectedRestaurant?.platform === 'resy' ? 'Resy' : 'OpenTable'} Authentication
-            </h2>
-            <button
-              onClick={() => setStep(3)}
-              className="text-sm text-gray-500 hover:text-gray-700"
-            >
-              ← Back
-            </button>
-          </div>
-
-          {selectedRestaurant?.platform === 'resy' ? (
-            /* Resy Auth Token */
-            <div className="space-y-4">
-              <div className="bg-blue-50 border-2 border-blue-300 rounded-lg p-4 text-sm">
-                <p className="font-bold text-blue-900 mb-3">📋 How to get your Resy auth token:</p>
-                <ol className="list-decimal list-inside space-y-2 text-blue-900">
-                  <li>Go to <a href="https://resy.com" target="_blank" rel="noopener noreferrer" className="underline font-semibold">resy.com</a> and log in</li>
-                  <li>Press <kbd className="bg-blue-100 px-1.5 py-0.5 rounded font-mono text-xs">F12</kbd> to open Developer Tools</li>
-                  <li>Click the <strong>Network</strong> tab</li>
-                  <li>Type <code className="bg-blue-100 px-1 rounded font-mono text-xs">api.resy.com</code> in the filter box</li>
-                  <li>Click on any restaurant or go to your <a href="https://resy.com/user" target="_blank" className="underline">profile</a> (triggers API calls)</li>
-                  <li>Click any request that appears → <strong>Headers</strong> → <strong>Request Headers</strong></li>
-                  <li>Find <code className="bg-blue-100 px-1 rounded font-mono text-xs">X-Resy-Auth-Token</code> and copy its value</li>
-                </ol>
-                <p className="text-xs text-blue-800 mt-3 pt-3 border-t border-blue-200">
-                  💡 The token starts with "ey..." and is 200-500 characters long.
+          {/* Booking Window Info */}
+          <div className="bg-purple-50 border-2 border-purple-300 rounded-lg p-4">
+            <div className="flex items-start justify-between mb-2">
+              <div>
+                <p className="font-bold text-purple-900 text-sm mb-1">📅 Booking Window</p>
+                <p className="text-xs text-purple-700 mb-2">
+                  When reservations are released by the restaurant
                 </p>
               </div>
-
-              <div>
-                <div className="flex items-center justify-between mb-2">
-                  <label className="block text-sm font-medium text-gray-700">
-                    Resy Auth Token <span className="text-red-500">*</span>
-                  </label>
-                  {resyAuthToken && (
-                    <button
-                      type="button"
-                      onClick={() => {
-                        setResyAuthToken('');
-                        localStorage.removeItem(RESY_TOKEN_KEY);
+              <button
+                onClick={() => setShowBookingWindowEdit(!showBookingWindowEdit)}
+                className="text-xs text-purple-600 hover:text-purple-800 underline"
+              >
+                {showBookingWindowEdit ? 'Hide' : 'Edit'}
+              </button>
+            </div>
+            
+            {showBookingWindowEdit ? (
+              <div className="space-y-3">
+                <div className="grid grid-cols-2 gap-3">
+                  <div>
+                    <label className="block text-xs text-purple-700 mb-1">Days in Advance</label>
+                    <input
+                      type="number"
+                      min="1"
+                      max="90"
+                      value={bookingWindow.daysInAdvance}
+                      onChange={(e) => {
+                        const value = e.target.value;
+                        if (value === '') {
+                          // Allow empty field while typing
+                          setBookingWindow({ ...bookingWindow, daysInAdvance: '' as any });
+                        } else {
+                          const numValue = parseInt(value);
+                          if (!isNaN(numValue)) {
+                            setBookingWindow({ ...bookingWindow, daysInAdvance: numValue });
+                          }
+                        }
                       }}
-                      className="text-xs text-red-600 hover:text-red-700 hover:underline"
-                    >
-                      Clear saved token
-                    </button>
-                  )}
+                      onBlur={(e) => {
+                        // On blur, ensure value is valid
+                        const value = e.target.value;
+                        const numValue = parseInt(value);
+                        if (value === '' || isNaN(numValue) || numValue < 1) {
+                          setBookingWindow({ ...bookingWindow, daysInAdvance: 1 });
+                        } else if (numValue > 90) {
+                          setBookingWindow({ ...bookingWindow, daysInAdvance: 90 });
+                        }
+                      }}
+                      className="w-full px-3 py-2 border border-purple-200 rounded-lg focus:ring-2 focus:ring-purple-500 focus:border-transparent text-sm"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-xs text-purple-700 mb-1">Release Time</label>
+                    <input
+                      type="time"
+                      value={bookingWindow.releaseTime}
+                      onChange={(e) => setBookingWindow({ ...bookingWindow, releaseTime: e.target.value })}
+                      className="w-full px-3 py-2 border border-purple-200 rounded-lg focus:ring-2 focus:ring-purple-500 focus:border-transparent text-sm"
+                    />
+                  </div>
                 </div>
-                <textarea
-                  value={resyAuthToken}
-                  onChange={(e) => setResyAuthToken(e.target.value)}
-                  className="w-full px-4 py-3 bg-white border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-primary-500 text-gray-900 placeholder:text-gray-500 font-mono text-xs"
-                  placeholder="eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9..."
-                  rows={4}
-                />
-                {resyAuthToken && (
-                  <div className="mt-2 space-y-2">
-                    <p className="text-xs text-green-600 font-medium">
-                      ✅ Token entered ({resyAuthToken.length} characters)
-                    </p>
-                    {tokenExpiration && (
-                      <div className={`text-xs font-medium ${
-                        isTokenExpired(resyAuthToken) 
-                          ? 'text-red-600 bg-red-50 border border-red-200' 
-                          : new Date(tokenExpiration).getTime() - Date.now() < 7 * 24 * 60 * 60 * 1000
-                          ? 'text-yellow-700 bg-yellow-50 border border-yellow-200'
-                          : 'text-blue-600 bg-blue-50 border border-blue-200'
-                      } px-3 py-2 rounded-lg`}>
-                        {isTokenExpired(resyAuthToken) ? (
-                          <>
-                            ⚠️ Token expired on {tokenExpiration.toLocaleDateString()} - Please get a new token
-                          </>
-                        ) : (
-                          <>
-                            🔑 Token expires: {tokenExpiration.toLocaleDateString()} at {tokenExpiration.toLocaleTimeString()}
-                            {new Date(tokenExpiration).getTime() - Date.now() < 7 * 24 * 60 * 60 * 1000 && (
-                              <span className="block mt-1">⚠️ Token expires in less than 7 days</span>
-                            )}
-                          </>
-                        )}
-                      </div>
-                    )}
-                    <p className="text-xs text-gray-500">
-                      💾 Token is saved automatically and will be reused for future reservations
-                    </p>
+                <div>
+                  <label className="block text-xs text-purple-700 mb-1">Timezone</label>
+                  <select
+                    value={bookingWindow.timezone}
+                    onChange={(e) => setBookingWindow({ ...bookingWindow, timezone: e.target.value })}
+                    className="w-full px-3 py-2 border border-purple-200 rounded-lg focus:ring-2 focus:ring-purple-500 focus:border-transparent text-sm"
+                  >
+                    <option value="America/New_York">Eastern Time (ET)</option>
+                    <option value="America/Chicago">Central Time (CT)</option>
+                    <option value="America/Denver">Mountain Time (MT)</option>
+                    <option value="America/Los_Angeles">Pacific Time (PT)</option>
+                  </select>
+                </div>
+                <p className="text-xs text-purple-600 italic">
+                  💡 If you're unsure, leave as default (30 days, midnight ET)
+                </p>
+              </div>
+            ) : (
+              <div className="text-sm text-purple-800">
+                <span className="font-medium">{bookingWindow.daysInAdvance} days in advance</span> at{' '}
+                <span className="font-medium">{bookingWindow.releaseTime}</span>
+                {selectedDate && (
+                  <div className="text-xs text-purple-700 mt-2 pt-2 border-t border-purple-200">
+                    ⏰ Reservations for {dayjs(selectedDate).format('MMM D, YYYY')} will open:{' '}
+                    <span className="font-semibold">
+                      {getBookingWindowOpenTime()?.format('MMM D, YYYY [at] h:mm A')}
+                    </span>
                   </div>
                 )}
               </div>
-            </div>
-          ) : (
-            /* OpenTable Email/Password Authentication */
-            <div className="space-y-4">
-              <div className="bg-yellow-50 border border-yellow-200 rounded-lg p-4 text-sm text-yellow-800">
-                ⚠️ OpenTable integration is limited - automated booking may not work due to anti-bot protection.
-              </div>
-              
-              <div>
-                <label className="block text-sm font-medium text-gray-700 mb-2">
-                  OpenTable Email
-                </label>
-                <input
-                  type="email"
-                  value={email}
-                  onChange={(e) => setEmail(e.target.value)}
-                  className="w-full px-4 py-2 bg-white border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-primary-500 text-gray-900 placeholder:text-gray-500"
-                  placeholder="your@email.com"
-                />
-              </div>
+            )}
+          </div>
 
-              <div>
-                <label className="block text-sm font-medium text-gray-700 mb-2">
-                  OpenTable Password
-                </label>
-                <input
-                  type="password"
-                  value={password}
-                  onChange={(e) => setPassword(e.target.value)}
-                  className="w-full px-4 py-2 bg-white border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-primary-500 text-gray-900 placeholder:text-gray-500"
-                  placeholder="••••••••"
-                />
-              </div>
-            </div>
-          )}
+          <div className="bg-blue-50 border-2 border-blue-300 rounded-lg p-4 text-sm space-y-3">
+            <p className="font-bold text-blue-900">🔐 Resy Auth Token</p>
+            <ol className="text-blue-800 text-xs list-decimal list-inside space-y-1">
+              <li>Go to <a href="https://resy.com" target="_blank" rel="noopener noreferrer" className="underline font-semibold">resy.com</a> and log in</li>
+              <li>Open DevTools → Network tab → reload the page</li>
+              <li>Click any request to <code>api.resy.com</code></li>
+              <li>Under <strong>Request Headers</strong>, copy the value of <code>x-resy-auth-token</code></li>
+            </ol>
+            <input
+              type="password"
+              placeholder="Paste your Resy auth token"
+              value={authToken}
+              onChange={(e) => setAuthToken(e.target.value)}
+              className="w-full px-3 py-2 border border-blue-300 rounded-lg text-xs font-mono focus:outline-none focus:ring-2 focus:ring-blue-500 bg-white text-gray-900"
+            />
+          </div>
 
           <button
             onClick={handleSubmit}
-            disabled={loading || (selectedRestaurant?.platform === 'resy' ? !resyAuthToken : !email || !password)}
+            disabled={loading || !timeRange.start || !timeRange.end || !authToken.trim()}
             className="w-full py-3 bg-green-600 text-white rounded-lg hover:bg-green-700 disabled:opacity-50 font-semibold"
           >
             {loading ? 'Creating...' : '✓ Schedule Reservation'}

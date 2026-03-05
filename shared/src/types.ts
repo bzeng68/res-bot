@@ -30,6 +30,7 @@ export interface ReservationRequest {
   scheduledPollTime?: string;
   result?: BookingResult;
   bookingAttempts?: BookingAttempt[]; // Log of all booking attempts
+  bookingWindow?: BookingWindow; // When reservations open
 }
 
 export interface TimeRange {
@@ -80,16 +81,6 @@ export interface SearchResult {
   query: string;
 }
 
-export interface JobStatus {
-  id: string;
-  restaurantName: string;
-  targetDate: string;
-  timeRange: TimeRange;
-  status: ReservationStatus;
-  countdown?: number; // seconds until polling starts
-  createdAt: string;
-}
-
 // API Response types
 export interface ApiResponse<T> {
   success: boolean;
@@ -97,8 +88,4 @@ export interface ApiResponse<T> {
   error?: string;
 }
 
-export interface WebSocketMessage {
-  type: 'status_update' | 'booking_success' | 'booking_failed' | 'polling_started';
-  jobId: string;
-  data: any;
-}
+

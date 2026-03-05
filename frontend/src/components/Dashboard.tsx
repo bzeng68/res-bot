@@ -123,6 +123,15 @@ export default function Dashboard({ refreshTrigger }: Props) {
     return errorMsg.includes('No slots match your') && errorMsg.includes('Available times:');
   };
 
+  const isBookingWindowNotOpen = (errorMsg: string): boolean => {
+    return errorMsg.includes('NOT_RELEASED_YET:') || errorMsg.includes("haven't opened yet");
+  };
+
+  const parseBookingWindowMessage = (errorMsg: string): string => {
+    // Remove the "NOT_RELEASED_YET: " prefix if present
+    return errorMsg.replace('NOT_RELEASED_YET: ', '').replace('Reservations for ', '');
+  };
+
   const getCountdown = (scheduledTime: string | undefined) => {
     if (!scheduledTime) return null;
     
@@ -226,13 +235,27 @@ export default function Dashboard({ refreshTrigger }: Props) {
 
                 {reservation.status === 'polling' && (
                   <div className="bg-yellow-50 rounded-lg p-3 text-sm">
-                    <div className="font-medium text-yellow-900 flex items-center gap-2">
-                      <Loader size={16} className="animate-spin" />
-                      Checking for availability...
-                    </div>
-                    <div className="text-yellow-700 text-xs mt-1">
-                      Polling started {dayjs(reservation.scheduledPollTime).fromNow()}
-                    </div>
+                    {reservation.result?.error && isBookingWindowNotOpen(reservation.result.error) ? (
+                      <>
+                        <div className="font-medium text-yellow-900 flex items-center gap-2">
+                          <Clock size={16} />
+                          Waiting for booking window to open...
+                        </div>
+                        <div className="text-yellow-700 text-xs mt-1">
+                          {parseBookingWindowMessage(reservation.result.error)}
+                        </div>
+                      </>
+                    ) : (
+                      <>
+                        <div className="font-medium text-yellow-900 flex items-center gap-2">
+                          <Loader size={16} className="animate-spin" />
+                          Checking for availability...
+                        </div>
+                        <div className="text-yellow-700 text-xs mt-1">
+                          Polling started {dayjs(reservation.scheduledPollTime).fromNow()}
+                        </div>
+                      </>
+                    )}
                   </div>
                 )}
 
@@ -251,9 +274,24 @@ export default function Dashboard({ refreshTrigger }: Props) {
 
                 {reservation.status === 'failed' && reservation.result?.error && (
                   <div className="space-y-3">
-                    <div className="bg-red-50 rounded-lg p-3 text-sm text-red-700">
-                      {reservation.result.error}
-                    </div>
+                    {isBookingWindowNotOpen(reservation.result.error) ? (
+                      <div className="bg-blue-50 rounded-lg p-4 text-sm">
+                        <div className="font-medium text-blue-900 mb-2 flex items-center gap-2">
+                          <Clock size={18} />
+                          Reservations Not Released Yet
+                        </div>
+                        <div className="text-blue-700">
+                          {parseBookingWindowMessage(reservation.result.error)}
+                        </div>
+                        <div className="text-blue-600 text-xs mt-2">
+                          The bot will automatically retry once the booking window opens.
+                        </div>
+                      </div>
+                    ) : (
+                      <div className="bg-red-50 rounded-lg p-3 text-sm text-red-700">
+                        {reservation.result.error}
+                      </div>
+                    )}
                     
                     {isTimeRangeMismatch(reservation.result.error) && (
                       <div className="bg-blue-50 rounded-lg p-4">
@@ -354,29 +392,101 @@ export default function Dashboard({ refreshTrigger }: Props) {
                   {expandedLogs[reservation.id] && (
                     <div className="mt-2 space-y-2 max-h-96 overflow-y-auto">
                       {[...reservation.bookingAttempts].reverse().map((attempt, idx) => (
-                        <div key={idx} className="text-xs border rounded-lg p-2">
-                          <div className="flex items-center justify-between mb-1">
+                        <div key={idx} className="text-xs border rounded-lg p-3 bg-white">
+                          <div className="flex items-center justify-between mb-2">
                             <span className={`px-2 py-0.5 rounded border font-medium ${getActionColor(attempt.action)}`}>
-                              {attempt.action}
+                              {attempt.action.replace(/_/g, ' ').toUpperCase()}
                             </span>
                             <span className="text-gray-500">
                               {dayjs(attempt.timestamp).format('MMM D, h:mm:ss A')}
                             </span>
                           </div>
-                          <div className="text-gray-700">{attempt.message}</div>
-                          {attempt.slotTime && (
-                            <div className="text-gray-500 mt-1">
-                              Time: {attempt.slotTime} {attempt.slotDate && `on ${attempt.slotDate}`}
+                          
+                          {/* Main message */}
+                          <div className="text-gray-800 font-medium mb-1">{attempt.message}</div>
+                          
+                          {/* Slot info if available */}
+                          {(attempt.slotTime || attempt.slotDate) && (
+                            <div className="text-gray-600 text-xs">
+                              {attempt.slotTime && <span>🕐 {attempt.slotTime}</span>}
+                              {attempt.slotTime && attempt.slotDate && <span className="mx-1">•</span>}
+                              {attempt.slotDate && <span>📅 {attempt.slotDate}</span>}
                             </div>
                           )}
-                          {attempt.details && (
-                            <details className="mt-1">
-                              <summary className="text-gray-500 cursor-pointer hover:text-gray-700">
-                                View details
+                          
+                          {/* Details section */}
+                          {attempt.details && Object.keys(attempt.details).length > 0 && (
+                            <details className="mt-2">
+                              <summary className="text-gray-600 cursor-pointer hover:text-gray-800 font-medium">
+                                📋 View details
                               </summary>
-                              <pre className="mt-1 p-2 bg-gray-50 rounded text-xs overflow-x-auto">
-                                {JSON.stringify(attempt.details, null, 2)}
-                              </pre>
+                              <div className="mt-2 p-2 bg-gray-50 rounded border border-gray-200">
+                                {/* Show key details inline */}
+                                <div className="space-y-1">
+                                  {attempt.details.httpStatus && (
+                                    <div className="text-xs">
+                                      <span className="font-semibold text-gray-700">HTTP Status:</span>{' '}
+                                      <span className={attempt.details.httpStatus >= 400 ? 'text-red-600 font-bold' : 'text-green-600'}>
+                                        {attempt.details.httpStatus}
+                                      </span>
+                                    </div>
+                                  )}
+                                  {(attempt.details.errorMessage || attempt.details.error || attempt.details.fullError) && (
+                                    <div className="text-xs">
+                                      <span className="font-semibold text-gray-700">Error:</span>{' '}
+                                      <span className="text-red-600 break-all">
+                                        {attempt.details.errorMessage || attempt.details.error || attempt.details.fullError}
+                                      </span>
+                                    </div>
+                                  )}
+                                  {attempt.details.confirmationCode && (
+                                    <div className="text-xs">
+                                      <span className="font-semibold text-gray-700">Confirmation:</span>{' '}
+                                      <span className="text-green-600 font-mono">{attempt.details.confirmationCode}</span>
+                                    </div>
+                                  )}
+                                  {attempt.details.venueName && (
+                                    <div className="text-xs">
+                                      <span className="font-semibold text-gray-700">Venue:</span>{' '}
+                                      <span>{attempt.details.venueName}</span>
+                                    </div>
+                                  )}
+                                  {attempt.details.slotCount !== undefined && (
+                                    <div className="text-xs">
+                                      <span className="font-semibold text-gray-700">Slots Found:</span>{' '}
+                                      <span>{attempt.details.slotCount}</span>
+                                    </div>
+                                  )}
+                                  {attempt.details.availableTimes && attempt.details.availableTimes.length > 0 && (
+                                    <div className="text-xs">
+                                      <span className="font-semibold text-gray-700">Available Times:</span>{' '}
+                                      <span>{attempt.details.availableTimes.join(', ')}</span>
+                                    </div>
+                                  )}
+                                  {attempt.details.reason && (
+                                    <div className="text-xs">
+                                      <span className="font-semibold text-gray-700">Reason:</span>{' '}
+                                      <span className="text-orange-600">{attempt.details.reason}</span>
+                                    </div>
+                                  )}
+                                  {attempt.details.bookingOpensAt && (
+                                    <div className="text-xs">
+                                      <span className="font-semibold text-gray-700">Booking Opens:</span>{' '}
+                                      <span>{dayjs(attempt.details.bookingOpensAt).format('MMM D, YYYY h:mm A')}</span>
+                                    </div>
+                                  )}
+                                </div>
+                                
+                                {/* Full JSON for debugging */}
+                                <details className="mt-2">
+                                  <summary className="text-xs text-gray-500 cursor-pointer hover:text-gray-700">
+                                    Show raw JSON
+                                  </summary>
+                                  <pre className="mt-1 p-2 bg-white rounded text-xs overflow-x-auto border border-gray-300">
+                                    {JSON.stringify(attempt.details, null, 2)}
+                                  </pre>
+                                </details>
+                              </div>
                             </details>
                           )}
                         </div>

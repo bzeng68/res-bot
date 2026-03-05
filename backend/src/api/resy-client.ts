@@ -2,62 +2,12 @@ import axios, { AxiosInstance } from 'axios';
 import type { 
   Restaurant, 
   SearchResult, 
-  AvailableSlot, 
-  PlatformCredentials 
+  AvailableSlot,
 } from '../../../shared/src/types.js';
 
 // Resy API endpoints (reverse-engineered)
 const RESY_BASE_URL = 'https://api.resy.com';
 const RESY_API_KEY = 'VbWk7s3L4KiK5fzlO7JD3Q5EYolJI7n5'; // Public API key from Resy web app
-
-interface ResyAuthResponse {
-  token: string;
-  user: {
-    id: string;
-    email: string;
-    first_name: string;
-    last_name: string;
-  };
-}
-
-interface ResyVenue {
-  id: {
-    resy: number;
-  };
-  name: string;
-  location: {
-    name: string;
-    address_1: string;
-    address_2?: string;
-    city: string;
-    state: string;
-    postal_code: string;
-  };
-  type: string;
-  booking_config?: {
-    booking_window: number; // days in advance
-    booking_time?: string; // time when bookings open
-  };
-}
-
-interface ResyAvailability {
-  results: {
-    venues: Array<{
-      slots: Array<{
-        config: {
-          id: string;
-          type: string;
-          token: string;
-        };
-        date: {
-          start: string;
-          end: string;
-        };
-        party_size: number;
-      }>;
-    }>;
-  };
-}
 
 class ResyClient {
   private client: AxiosInstance;
@@ -101,9 +51,9 @@ class ResyClient {
           ? venue.cuisine[0] 
           : (venue.type || 'Restaurant'),
         bookingWindow: {
-          daysInAdvance: 30, // Default, not provided in search results
-          releaseTime: '09:00', // Default, not provided in search results
-          timezone: 'America/New_York', // Default, should be determined by location
+          daysInAdvance: 30, // Default - most restaurants use 30 days
+          releaseTime: '00:00', // Default to midnight - most common release time
+          timezone: 'America/New_York', // Default to ET, should be determined by location
         },
         platform: 'resy',
       }));
@@ -128,7 +78,7 @@ class ResyClient {
     partySize: number
   ): Promise<AvailableSlot[]> {
     try {
-      const response = await this.client.get<ResyAvailability>('/4/find', {
+      const response = await this.client.get<any>('/4/find', {
         params: {
           lat: 0,
           long: 0,
@@ -159,6 +109,121 @@ class ResyClient {
       throw new Error('Failed to check availability');
     }
   }
+
+  // Fetch the user's Resy payment method ID using their auth token
+  async getPaymentMethodId(authToken: string): Promise<number | null> {
+    const baseHeaders = {
+      'Authorization': `ResyAPI api_key="${RESY_API_KEY}"`,
+      'X-Resy-Auth-Token': authToken,
+      'X-Resy-Universal-Auth': authToken,
+      'Accept': 'application/json, text/plain, */*',
+      'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+      'Origin': 'https://resy.com',
+      'Referer': 'https://resy.com/',
+    };
+
+    try {
+      const res = await axios.get(`${RESY_BASE_URL}/2/user`, { headers: baseHeaders });
+      const paymentMethods = res.data?.payment_methods;
+      if (paymentMethods && paymentMethods.length > 0) {
+        const id = paymentMethods[0]?.id;
+        console.log(`💳 Found payment method ID: ${id}`);
+        return id;
+      }
+    } catch (err: any) {
+      console.warn('Could not fetch payment method from /2/user:', err.response?.data || err.message);
+    }
+
+    // Fallback: try /3/user
+    try {
+      const res = await axios.get(`${RESY_BASE_URL}/3/user`, { headers: baseHeaders });
+      const pm = res.data?.payment_method_id || res.data?.payment_methods?.[0]?.id;
+      if (pm) {
+        console.log(`💳 Found payment method ID (fallback): ${pm}`);
+        return pm;
+      }
+    } catch (err: any) {
+      console.warn('Could not fetch payment method from /3/user:', err.response?.data || err.message);
+    }
+
+    return null;
+  }
+
+  // Book a reservation. Mirrors the working open-source resybot approach:
+  //  1. GET /3/details (NOT POST) with venue_id + auth token in query string
+  //  2. POST /3/book with struct_payment_method + source_id
+  // No cookies required — the JWT auth token is sufficient.
+  async bookReservation(
+    slotToken: string,
+    partySize: number,
+    venueId: string,
+    authToken: string,
+  ): Promise<{ confirmationCode: string; reservationDetails: any }> {
+    const commonHeaders = {
+      'Authorization': `ResyAPI api_key="${RESY_API_KEY}"`,
+      'X-Resy-Auth-Token': authToken,
+      'X-Resy-Universal-Auth': authToken,
+      'Accept': 'application/json, text/plain, */*',
+      'Accept-Encoding': 'gzip, deflate, br',
+      'Host': 'api.resy.com',
+      'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+    };
+
+    // Extract date from slot token (e.g. "rgs://resy/.../2026-03-31/...")
+    const dateMatch = slotToken.match(/(\d{4}-\d{2}-\d{2})/);
+    const day = dateMatch ? dateMatch[1] : '';
+    if (!day) throw new Error(`Could not extract date from slot token: ${slotToken}`);
+
+    // Step 1: GET /3/details — NOTE: GET not POST, auth token in query string
+    const detailsUrl = `${RESY_BASE_URL}/3/details?day=${encodeURIComponent(day)}&party_size=${partySize}&x-resy-auth-token=${encodeURIComponent(authToken)}&venue_id=${encodeURIComponent(venueId)}&config_id=${encodeURIComponent(slotToken)}`;
+    console.log(`📋 GET /3/details for venue ${venueId} on ${day} party ${partySize}...`);
+
+    const detailsRes = await axios.get(detailsUrl, { headers: commonHeaders });
+    const bookToken = detailsRes.data?.book_token?.value;
+
+    if (!bookToken) {
+      console.error('Details response:', JSON.stringify(detailsRes.data));
+      throw new Error('No book_token returned from /3/details');
+    }
+    console.log('✓ Got book token');
+
+    // Step 2: Fetch payment method ID
+    let paymentMethodId = await this.getPaymentMethodId(authToken);
+    if (!paymentMethodId) {
+      // If we still can't get payment ID, try a value the reference bot uses as placeholder
+      console.warn('⚠️ Could not retrieve payment method ID — booking may fail without it');
+    }
+
+    // Step 3: POST /3/book with struct_payment_method + source_id
+    const bookHeaders = {
+      ...commonHeaders,
+      'X-Origin': 'https://widgets.resy.com',
+      'Referer': 'https://widgets.resy.com/',
+      'Cache-Control': 'no-cache',
+      'Sec-Fetch-Dest': 'empty',
+      'Content-Type': 'application/x-www-form-urlencoded',
+    };
+
+    const bookPayload: Record<string, string> = {
+      book_token: bookToken,
+      source_id: 'resy.com-venue-details',
+    };
+    if (paymentMethodId) {
+      bookPayload.struct_payment_method = JSON.stringify({ id: paymentMethodId });
+    }
+
+    console.log(`📝 POST /3/book (payment method: ${paymentMethodId ?? 'none'})...`);
+    const bookRes = await axios.post(
+      `${RESY_BASE_URL}/3/book`,
+      new URLSearchParams(bookPayload).toString(),
+      { headers: bookHeaders },
+    );
+
+    const confirmationCode = bookRes.data?.resy_token || bookRes.data?.reservation_id || '';
+    console.log('🎉 Booked! Confirmation:', confirmationCode);
+
+    return { confirmationCode, reservationDetails: bookRes.data };
+  }
 }
 
 // Export singleton instance
@@ -171,4 +236,8 @@ export async function searchRestaurants(query: string, location: string) {
 
 export async function getAvailability(venueId: string, date: string, partySize: number) {
   return resyClient.getAvailability(venueId, date, partySize);
+}
+
+export async function bookReservation(slotToken: string, partySize: number, venueId: string, authToken: string) {
+  return resyClient.bookReservation(slotToken, partySize, venueId, authToken);
 }

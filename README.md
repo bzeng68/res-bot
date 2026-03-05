@@ -1,4 +1,4 @@
-# Resy-Bot 🍽️
+# Res-Bot 🍽️
 
 Automated reservation bot for Resy that monitors and books restaurant reservations the moment they become available.
 
@@ -116,7 +116,7 @@ The bot uses a Chrome extension with a **content script** to make bookings. The 
 ## Project Structure
 
 ```
-resy-bot/
+res-bot/
 ├── frontend/         # React UI
 ├── backend/          # Express API + scheduler + WebSocket
 ├── extension/        # Chrome Extension for booking

@@ -12,6 +12,8 @@ import {
   updateReservation,
   deleteReservation,
 } from '../database.js';
+import { stopJobForReservation } from '../scheduler/index.js';
+import { wss } from '../ws.js';
 import type { ReservationRequest, ApiResponse } from '../../../shared/src/types.js';
 
 dayjs.extend(utc);
@@ -73,23 +75,48 @@ router.post('/', (req, res) => {
   try {
     const reservationData = req.body;
     
-    // Calculate scheduled poll time
+    // Calculate scheduled poll time based on booking window
     const targetDate = dayjs(reservationData.targetDate);
     const now = dayjs();
     
     let scheduledPollTime: string;
     
-    // Check if target date is today or very soon
-    const hoursUntilReservation = targetDate.diff(now, 'hours');
-    
-    if (hoursUntilReservation <= 12) {
-      // If reservation is within 12 hours (or in the past), start polling immediately
-      scheduledPollTime = now.toISOString();
-      console.log(`⚡ Reservation is within 12 hours - scheduling for immediate polling`);
+    if (reservationData.bookingWindow) {
+      // Use the restaurant's actual booking window
+      const { daysInAdvance, releaseTime, timezone: tz } = reservationData.bookingWindow;
+      const [hours, minutes] = releaseTime.split(':').map(Number);
+      
+      // Calculate when booking window opens in the restaurant's timezone
+      const bookingOpensAt = targetDate
+        .tz(tz)
+        .subtract(daysInAdvance, 'days')
+        .hour(hours)
+        .minute(minutes)
+        .second(0);
+      
+      // Check if booking window has already opened
+      if (now.isAfter(bookingOpensAt)) {
+        // Booking window already open - start polling immediately
+        scheduledPollTime = now.toISOString();
+        console.log(`⚡ Booking window already open - scheduling for immediate polling`);
+      } else {
+        // Schedule polling to start 30 seconds before booking window opens
+        scheduledPollTime = bookingOpensAt.subtract(30, 'seconds').toISOString();
+        console.log(`⏰ Booking window opens ${bookingOpensAt.format('MMM D, YYYY [at] h:mm A')} - scheduling polling for that time`);
+      }
     } else {
-      // Otherwise, calculate based on booking window (30 days before target date)
-      const bookingWindowOpens = targetDate.subtract(reservationData.bookingWindow?.daysInAdvance || 30, 'days');
-      scheduledPollTime = bookingWindowOpens.subtract(30, 'seconds').toISOString();
+      // No booking window info - use fallback logic
+      const hoursUntilReservation = targetDate.diff(now, 'hours');
+      
+      if (hoursUntilReservation <= 12) {
+        // If reservation is within 12 hours, start polling immediately
+        scheduledPollTime = now.toISOString();
+        console.log(`⚡ Reservation is within 12 hours - scheduling for immediate polling`);
+      } else {
+        // Otherwise, calculate based on default 30 days booking window
+        const bookingWindowOpens = targetDate.subtract(30, 'days');
+        scheduledPollTime = bookingWindowOpens.subtract(30, 'seconds').toISOString();
+      }
     }
     
     const reservation: ReservationRequest = {
@@ -101,6 +128,7 @@ router.post('/', (req, res) => {
       partySize: reservationData.partySize,
       userEmail: reservationData.userEmail,
       credentials: reservationData.credentials,
+      bookingWindow: reservationData.bookingWindow,
       status: 'scheduled',
       createdAt: new Date().toISOString(),
       scheduledPollTime,
@@ -177,7 +205,30 @@ router.delete('/:id', (req, res) => {
       return;
     }
     
+    // Stop any active polling job for this reservation
+    stopJobForReservation(req.params.id);
+    console.log(`🗑️ Stopped polling job and deleted reservation for ${reservation.restaurantName}`);
+    
+    // Delete the reservation from database
     deleteReservation(req.params.id);
+    
+    // Broadcast to connected clients that reservation was deleted
+    // This ensures the frontend UI updates immediately
+    const message = JSON.stringify({
+      type: 'reservation_deleted',
+      jobId: req.params.id,
+      data: {
+        reservationId: req.params.id,
+        restaurantName: reservation.restaurantName,
+      },
+      timestamp: new Date().toISOString(),
+    });
+    
+    wss.clients.forEach((client: any) => {
+      if (client.readyState === 1) { // WebSocket.OPEN
+        client.send(message);
+      }
+    });
     
     res.json({ 
       success: true, 

@@ -18,7 +18,7 @@ function App() {
           <div className="flex items-center justify-center gap-3 mb-4">
             <Utensils size={48} className="text-primary-400" />
             <h1 className="text-5xl font-bold bg-gradient-to-r from-primary-400 to-primary-600 bg-clip-text text-transparent">
-              Resy-Bot
+              Res-Bot
             </h1>
           </div>
           <p className="text-lg text-gray-400 max-w-2xl mx-auto">
