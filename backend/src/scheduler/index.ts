@@ -3,7 +3,8 @@ import dayjs from 'dayjs';
 import utc from 'dayjs/plugin/utc.js';
 import timezone from 'dayjs/plugin/timezone.js';
 import { getActiveReservations, updateReservationStatus } from '../database.js';
-import { bookWithRetry } from './poller.js';
+import { bookWithRetry, setPrewarmedSlots, setPrewarmedBookToken, findBestSlot } from './poller.js';
+import { getAvailability, getBookToken } from '../api/resy-client.js';
 import { wss } from '../ws.js';
 import type { ReservationRequest } from '../../../shared/src/types.js';
 
@@ -29,8 +30,7 @@ export function getFireTime(reservation: ReservationRequest): dayjs.Dayjs {
   const { daysInAdvance, releaseTime, timezone: tz } = reservation.bookingWindow;
   const [hours, minutes] = releaseTime.split(':').map(Number);
 
-  return dayjs(reservation.targetDate)
-    .tz(tz)
+  return dayjs.tz(reservation.targetDate, tz)
     .subtract(daysInAdvance, 'days')
     .hour(hours)
     .minute(minutes)
@@ -63,6 +63,36 @@ export function checkAndScheduleJobs() {
 
     const timeoutId = setTimeout(() => fire(reservation), msUntilFire);
     scheduledJobs.set(reservation.id, timeoutId);
+
+    // Pre-warm: fetch availability ~500ms early, then immediately pipeline /3/details
+    // for the best matching slot. By fire time both the slots and book_token are cached,
+    // leaving only POST /3/book on the critical path.
+    const prewarmDelay = Math.max(0, msUntilFire - 500);
+    setTimeout(async () => {
+      try {
+        const slots = await getAvailability(reservation.restaurantId, reservation.targetDate, reservation.partySize);
+        setPrewarmedSlots(reservation.id, slots);
+
+        if (slots.length === 0) return; // Window not open yet — /4/find returned empty
+        console.log(`🔥 Prewarm: ${slots.length} slots for ${reservation.restaurantName}`);
+
+        // Find the best slot and immediately fetch its book_token
+        const bestSlot = findBestSlot(
+          slots,
+          reservation.timeRange.start,
+          reservation.timeRange.end,
+          reservation.timeRange.preferredTimes,
+        );
+        if (!bestSlot) return; // No matching slot yet
+
+        const authToken = reservation.credentials?.authToken;
+        if (!authToken) return;
+
+        const bookToken = await getBookToken(bestSlot.slotId, reservation.partySize, reservation.restaurantId, authToken);
+        setPrewarmedBookToken(reservation.id, bookToken, bestSlot.slotId);
+        console.log(`⚡ Prewarm complete: book_token cached for ${reservation.restaurantName}`);
+      } catch { /* non-critical, normal path will fetch */ }
+    }, prewarmDelay);
   }
 }
 
@@ -79,6 +109,8 @@ async function fire(reservation: ReservationRequest) {
   const result = await bookWithRetry(reservation);
 
   if (result.success) {
+    const windowOpenedAt = getFireTime(reservation).subtract(1, 'second');
+    result.timeToBookMs = Date.now() - windowOpenedAt.valueOf();
     updateReservationStatus(reservation.id, 'booked', result);
     broadcastUpdate(reservation.id, 'booking_success', {
       restaurantName: reservation.restaurantName,

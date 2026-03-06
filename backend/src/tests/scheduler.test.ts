@@ -74,6 +74,13 @@ describe('scheduler', () => {
       },
       '../scheduler/poller.js': {
         bookWithRetry: fakeBookWithRetry,
+        setPrewarmedSlots: sinon.stub(),
+        setPrewarmedBookToken: sinon.stub(),
+        findBestSlot: sinon.stub().returns(null), // prewarm bails out on null
+      },
+      '../api/resy-client.js': {
+        getAvailability: sinon.stub().resolves([]),
+        getBookToken: sinon.stub().resolves('tok-prewarm'),
       },
       'node-cron': {
         default: { schedule: sinon.stub() }, // prevent real cron from starting
@@ -140,9 +147,7 @@ describe('scheduler', () => {
 
       scheduler.checkAndScheduleJobs();
 
-      assert.equal(clock.countTimers(), 1, 'should have one pending timer');
-
-      // Tick forward 0 ms — fires the immediate timeout
+      assert.equal(clock.countTimers(), 2, 'should have two pending timers (fire + prewarm)');
       clock.tick(0);
       // Allow the async fire() to call bookWithRetry
       await Promise.resolve();
@@ -164,9 +169,7 @@ describe('scheduler', () => {
 
       scheduler.checkAndScheduleJobs();
 
-      assert.equal(clock.countTimers(), 1, 'should have one pending timer');
-
-      // 4 minutes pass — should NOT have fired
+      assert.equal(clock.countTimers(), 2, 'should have two pending timers (fire + prewarm)');
       clock.tick(4 * 60 * 1000);
       await Promise.resolve();
       assert.isFalse(fakeBookWithRetry.called, 'should not book before the window opens');
@@ -196,7 +199,7 @@ describe('scheduler', () => {
       scheduler.checkAndScheduleJobs();
       scheduler.checkAndScheduleJobs(); // second call should be a no-op
 
-      assert.equal(clock.countTimers(), 1, 'should still have exactly one timer');
+      assert.equal(clock.countTimers(), 2, 'should still have exactly two timers (fire + prewarm)');
     });
 
     it('skips reservations that are already booked or failed', () => {

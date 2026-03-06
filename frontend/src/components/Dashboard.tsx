@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { Clock, Calendar, Users, Trash2, CheckCircle, XCircle, Loader, Edit2, Save, X, ChevronDown, ChevronUp } from 'lucide-react';
+import { Clock, Calendar, Users, Trash2, CheckCircle, XCircle, Loader, Edit2, Save, X, ChevronDown, ChevronUp, Copy, Check, RefreshCw } from 'lucide-react';
 import dayjs from 'dayjs';
 import relativeTime from 'dayjs/plugin/relativeTime';
 import { getAllReservations, deleteReservation, updateReservation, connectWebSocket } from '../api/client';
@@ -18,6 +18,8 @@ export default function Dashboard({ refreshTrigger }: Props) {
   const [editStart, setEditStart] = useState('');
   const [editEnd, setEditEnd] = useState('');
   const [expandedLogs, setExpandedLogs] = useState<Record<string, boolean>>({});
+  const [copiedId, setCopiedId] = useState<string | null>(null);
+  const [refreshing, setRefreshing] = useState(false);
 
   useEffect(() => {
     loadReservations();
@@ -36,6 +38,12 @@ export default function Dashboard({ refreshTrigger }: Props) {
     };
   }, []);
 
+  const handleRefresh = async () => {
+    setRefreshing(true);
+    await loadReservations();
+    setRefreshing(false);
+  };
+
   const loadReservations = async () => {
     try {
       const data = await getAllReservations();
@@ -49,8 +57,10 @@ export default function Dashboard({ refreshTrigger }: Props) {
 
   const handleDelete = async (id: string) => {
     const reservation = reservations.find(r => r.id === id);
-    const action = reservation?.status === 'scheduled' || reservation?.status === 'polling' 
-      ? 'Cancel this reservation attempt?' 
+    const action = reservation?.status === 'booked'
+      ? 'Delete this confirmed reservation from the list?'
+      : reservation?.status === 'scheduled' || reservation?.status === 'polling'
+      ? 'Cancel this reservation attempt?'
       : 'Delete this reservation?';
     
     if (!confirm(action)) return;
@@ -132,6 +142,14 @@ export default function Dashboard({ refreshTrigger }: Props) {
     return errorMsg.replace('NOT_RELEASED_YET: ', '').replace('Reservations for ', '');
   };
 
+  const formatTimeToBook = (ms: number): string => {
+    if (ms < 1000) return `${ms}ms`;
+    if (ms < 60_000) return `${(ms / 1000).toFixed(1)}s`;
+    const m = Math.floor(ms / 60_000);
+    const s = Math.round((ms % 60_000) / 1000);
+    return `${m}m ${s}s`;
+  };
+
   const getCountdown = (scheduledTime: string | undefined) => {
     if (!scheduledTime) return null;
     
@@ -190,7 +208,17 @@ export default function Dashboard({ refreshTrigger }: Props) {
 
   return (
     <div className="space-y-4">
-      <h2 className="text-2xl font-bold text-white">All Reservations</h2>
+      <div className="flex items-center gap-3">
+        <h2 className="text-2xl font-bold text-white">All Reservations</h2>
+        <button
+          onClick={handleRefresh}
+          disabled={refreshing}
+          className="p-1.5 text-white/60 hover:text-white hover:bg-white/10 rounded-lg transition-colors disabled:opacity-40"
+          title="Refresh"
+        >
+          <RefreshCw size={18} className={refreshing ? 'animate-spin' : ''} />
+        </button>
+      </div>
       
       <div className="grid gap-4">
         {reservations.map((reservation) => (
@@ -225,7 +253,9 @@ export default function Dashboard({ refreshTrigger }: Props) {
                 {reservation.scheduledPollTime && reservation.status === 'scheduled' && (
                   <div className="bg-blue-50 rounded-lg p-3 text-sm">
                     <div className="font-medium text-blue-900">
-                      Booking attempt starts in: {getCountdown(reservation.scheduledPollTime)}
+                      {getCountdown(reservation.scheduledPollTime) === 'Polling now...'
+                        ? 'Booking window is open — attempting now...'
+                        : `Booking window opens in: ${getCountdown(reservation.scheduledPollTime)}`}
                     </div>
                     <div className="text-blue-700 text-xs mt-1">
                       {dayjs(reservation.scheduledPollTime).format('MMM D, YYYY [at] h:mm A')}
@@ -265,8 +295,28 @@ export default function Dashboard({ refreshTrigger }: Props) {
                       ✓ Reservation confirmed!
                     </div>
                     {reservation.result.confirmationCode && (
-                      <div className="text-green-700 text-xs mt-1">
-                        Confirmation: {reservation.result.confirmationCode}
+                      <div className="text-green-700 text-xs mt-1 flex items-center gap-1">
+                        <span className="shrink-0">Confirmation:</span>
+                        <button
+                          onClick={() => {
+                            navigator.clipboard.writeText(reservation.result!.confirmationCode!);
+                            setCopiedId(reservation.id);
+                            setTimeout(() => setCopiedId(null), 2000);
+                          }}
+                          className="flex items-center gap-1 text-green-700 hover:text-green-900 transition-colors"
+                          title={reservation.result.confirmationCode}
+                        >
+                          {copiedId === reservation.id ? (
+                            <><Check size={12} className="shrink-0" /><span>Copied!</span></>
+                          ) : (
+                            <><Copy size={12} className="shrink-0" /><span>Copy code</span></>
+                          )}
+                        </button>
+                      </div>
+                    )}
+                    {reservation.result.timeToBookMs != null && (
+                      <div className="text-green-600 text-xs mt-1">
+                        Booked in {formatTimeToBook(reservation.result.timeToBookMs)} after window opened
                       </div>
                     )}
                   </div>
@@ -496,15 +546,13 @@ export default function Dashboard({ refreshTrigger }: Props) {
                 </div>
               )}
 
-              {reservation.status !== 'booked' && (
-                <button
-                  onClick={() => handleDelete(reservation.id)}
-                  className="ml-4 p-2 text-red-600 hover:bg-red-50 rounded-lg transition-colors"
-                  title="Delete"
-                >
-                  <Trash2 size={20} />
-                </button>
-              )}
+              <button
+                onClick={() => handleDelete(reservation.id)}
+                className="ml-4 p-2 text-red-600 hover:bg-red-50 rounded-lg transition-colors shrink-0"
+                title={reservation.status === 'booked' ? 'Delete reservation' : 'Cancel'}
+              >
+                <Trash2 size={20} />
+              </button>
             </div>
           </div>
         ))}

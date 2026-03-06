@@ -112,6 +112,7 @@ export function updateReservation(
     reservation.credentials = {
       platform: 'resy',
       authToken: updates.credentials.authToken ? encryptPassword(updates.credentials.authToken) : reservation.credentials.authToken,
+      ...(updates.credentials.paymentMethodId != null && { paymentMethodId: updates.credentials.paymentMethodId }),
     };
   }
   
@@ -157,6 +158,11 @@ function decryptReservationCredentials(reservation: ReservationRequest): Reserva
       decryptedCredentials.authToken = decryptPassword(reservation.credentials.authToken);
     } else {
       decryptedCredentials.authToken = reservation.credentials.authToken;
+    }
+
+    // Preserve cached payment method ID (not encrypted, just a number)
+    if (reservation.credentials.paymentMethodId != null) {
+      decryptedCredentials.paymentMethodId = reservation.credentials.paymentMethodId;
     }
     
     return {

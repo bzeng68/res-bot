@@ -149,17 +149,17 @@ class ResyClient {
     return null;
   }
 
-  // Book a reservation. Mirrors the working open-source resybot approach:
-  //  1. GET /3/details (NOT POST) with venue_id + auth token in query string
-  //  2. POST /3/book with struct_payment_method + source_id
-  // No cookies required — the JWT auth token is sufficient.
-  async bookReservation(
+  // Fetch the book_token for a specific slot. Extracted so the prewarm step can
+  // call it independently and cache the result, eliminating /3/details from the
+  // hot booking path (~1.5s saved).
+  async getBookToken(
     slotToken: string,
     partySize: number,
     venueId: string,
     authToken: string,
-  ): Promise<{ confirmationCode: string; reservationDetails: any }> {
-    const commonHeaders = {
+    headers?: Record<string, string>,
+  ): Promise<string> {
+    const commonHeaders = headers ?? {
       'Authorization': `ResyAPI api_key="${RESY_API_KEY}"`,
       'X-Resy-Auth-Token': authToken,
       'X-Resy-Universal-Auth': authToken,
@@ -169,12 +169,10 @@ class ResyClient {
       'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
     };
 
-    // Extract date from slot token (e.g. "rgs://resy/.../2026-03-31/...")
     const dateMatch = slotToken.match(/(\d{4}-\d{2}-\d{2})/);
     const day = dateMatch ? dateMatch[1] : '';
     if (!day) throw new Error(`Could not extract date from slot token: ${slotToken}`);
 
-    // Step 1: GET /3/details — NOTE: GET not POST, auth token in query string
     const detailsUrl = `${RESY_BASE_URL}/3/details?day=${encodeURIComponent(day)}&party_size=${partySize}&x-resy-auth-token=${encodeURIComponent(authToken)}&venue_id=${encodeURIComponent(venueId)}&config_id=${encodeURIComponent(slotToken)}`;
     console.log(`📋 GET /3/details for venue ${venueId} on ${day} party ${partySize}...`);
 
@@ -186,12 +184,53 @@ class ResyClient {
       throw new Error('No book_token returned from /3/details');
     }
     console.log('✓ Got book token');
+    return bookToken;
+  }
 
-    // Step 2: Fetch payment method ID
-    let paymentMethodId = await this.getPaymentMethodId(authToken);
-    if (!paymentMethodId) {
-      // If we still can't get payment ID, try a value the reference bot uses as placeholder
-      console.warn('⚠️ Could not retrieve payment method ID — booking may fail without it');
+  // Book a reservation. Mirrors the working open-source resybot approach:
+  //  1. GET /3/details (NOT POST) with venue_id + auth token in query string
+  //  2. POST /3/book with struct_payment_method + source_id
+  // No cookies required — the JWT auth token is sufficient.
+  //
+  // Pass `cachedPaymentMethodId` to skip the /2/user fetch (~400ms saved).
+  // Pass `cachedBookToken` to skip the /3/details fetch (~1.5s saved).
+  async bookReservation(
+    slotToken: string,
+    partySize: number,
+    venueId: string,
+    authToken: string,
+    cachedPaymentMethodId?: number,
+    cachedBookToken?: string,
+  ): Promise<{ confirmationCode: string; reservationDetails: any }> {
+    const commonHeaders = {
+      'Authorization': `ResyAPI api_key="${RESY_API_KEY}"`,
+      'X-Resy-Auth-Token': authToken,
+      'X-Resy-Universal-Auth': authToken,
+      'Accept': 'application/json, text/plain, */*',
+      'Accept-Encoding': 'gzip, deflate, br',
+      'Host': 'api.resy.com',
+      'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+    };
+
+    // Step 1: book_token — use cached value if available (skips /3/details, ~1.5s saved)
+    let bookToken: string;
+    if (cachedBookToken) {
+      bookToken = cachedBookToken;
+      console.log('⚡ Using cached book_token (skipped /3/details)');
+    } else {
+      bookToken = await this.getBookToken(slotToken, partySize, venueId, authToken, commonHeaders);
+    }
+
+    // Step 2: Payment method ID — use cached value if available (avoids a ~400ms round-trip)
+    let paymentMethodId: number | null;
+    if (cachedPaymentMethodId != null) {
+      paymentMethodId = cachedPaymentMethodId;
+      console.log(`💳 Using cached payment method ID: ${paymentMethodId}`);
+    } else {
+      paymentMethodId = await this.getPaymentMethodId(authToken);
+      if (!paymentMethodId) {
+        console.warn('⚠️ Could not retrieve payment method ID — booking may fail without it');
+      }
     }
 
     // Step 3: POST /3/book with struct_payment_method + source_id
@@ -238,6 +277,10 @@ export async function getAvailability(venueId: string, date: string, partySize: 
   return resyClient.getAvailability(venueId, date, partySize);
 }
 
-export async function bookReservation(slotToken: string, partySize: number, venueId: string, authToken: string) {
-  return resyClient.bookReservation(slotToken, partySize, venueId, authToken);
+export async function getBookToken(slotToken: string, partySize: number, venueId: string, authToken: string) {
+  return resyClient.getBookToken(slotToken, partySize, venueId, authToken);
+}
+
+export async function bookReservation(slotToken: string, partySize: number, venueId: string, authToken: string, paymentMethodId?: number, bookToken?: string) {
+  return resyClient.bookReservation(slotToken, partySize, venueId, authToken, paymentMethodId, bookToken);
 }

@@ -13,6 +13,7 @@ import {
   deleteReservation,
 } from '../database.js';
 import { stopJobForReservation } from '../scheduler/index.js';
+import { resyClient } from '../api/resy-client.js';
 import { wss } from '../ws.js';
 import type { ReservationRequest, ApiResponse } from '../../../shared/src/types.js';
 
@@ -71,52 +72,40 @@ router.get('/:id', (req, res) => {
 });
 
 // Create new reservation
-router.post('/', (req, res) => {
+router.post('/', async (req, res) => {
   try {
     const reservationData = req.body;
     
-    // Calculate scheduled poll time based on booking window
-    const targetDate = dayjs(reservationData.targetDate);
+    // Calculate scheduled poll time based on booking window.
+    // Use dayjs.tz(date, tz) — NOT dayjs(date).tz(tz) — to parse the date as
+    // midnight in the restaurant's timezone rather than converting from UTC.
     const now = dayjs();
     
     let scheduledPollTime: string;
     
     if (reservationData.bookingWindow) {
-      // Use the restaurant's actual booking window
       const { daysInAdvance, releaseTime, timezone: tz } = reservationData.bookingWindow;
       const [hours, minutes] = releaseTime.split(':').map(Number);
       
-      // Calculate when booking window opens in the restaurant's timezone
-      const bookingOpensAt = targetDate
-        .tz(tz)
+      const bookingOpensAt = dayjs.tz(reservationData.targetDate, tz)
         .subtract(daysInAdvance, 'days')
         .hour(hours)
         .minute(minutes)
-        .second(0);
+        .second(1); // match getFireTime exactly
       
-      // Check if booking window has already opened
       if (now.isAfter(bookingOpensAt)) {
-        // Booking window already open - start polling immediately
         scheduledPollTime = now.toISOString();
         console.log(`⚡ Booking window already open - scheduling for immediate polling`);
       } else {
-        // Schedule polling to start 30 seconds before booking window opens
-        scheduledPollTime = bookingOpensAt.subtract(30, 'seconds').toISOString();
+        scheduledPollTime = bookingOpensAt.toISOString();
         console.log(`⏰ Booking window opens ${bookingOpensAt.format('MMM D, YYYY [at] h:mm A')} - scheduling polling for that time`);
       }
     } else {
-      // No booking window info - use fallback logic
-      const hoursUntilReservation = targetDate.diff(now, 'hours');
-      
-      if (hoursUntilReservation <= 12) {
-        // If reservation is within 12 hours, start polling immediately
-        scheduledPollTime = now.toISOString();
-        console.log(`⚡ Reservation is within 12 hours - scheduling for immediate polling`);
-      } else {
-        // Otherwise, calculate based on default 30 days booking window
-        const bookingWindowOpens = targetDate.subtract(30, 'days');
-        scheduledPollTime = bookingWindowOpens.subtract(30, 'seconds').toISOString();
-      }
+      // No booking window info — fall back to booking date minus 30 days
+      const bookingWindowOpens = dayjs(reservationData.targetDate).subtract(30, 'days');
+      scheduledPollTime = now.isAfter(bookingWindowOpens)
+        ? now.toISOString()
+        : bookingWindowOpens.toISOString();
     }
     
     const reservation: ReservationRequest = {
@@ -140,6 +129,22 @@ router.post('/', (req, res) => {
       success: true, 
       data: reservation 
     } as ApiResponse<ReservationRequest>);
+
+    // Fire-and-forget: cache the payment method ID so booking day skips the /2/user fetch.
+    // This runs after the response is sent so it doesn't add latency to reservation creation.
+    const authToken = reservation.credentials?.authToken;
+    if (authToken) {
+      resyClient.getPaymentMethodId(authToken)
+        .then(id => {
+          if (id != null) {
+            updateReservation(reservation.id, {
+              credentials: { ...reservation.credentials, paymentMethodId: id },
+            });
+            console.log(`💳 Cached payment method ID ${id} for ${reservation.restaurantName}`);
+          }
+        })
+        .catch(() => { /* non-critical */ });
+    }
   } catch (error) {
     console.error('Error creating reservation:', error);
     res.status(500).json({ 

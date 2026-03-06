@@ -49,6 +49,7 @@ export type ReservationStatus =
 export interface PlatformCredentials {
   platform: 'resy';
   authToken: string; // Manually extracted from browser, encrypted in storage
+  paymentMethodId?: number; // Cached at reservation creation to avoid a fetch at booking time
 }
 
 export interface BookingResult {
@@ -57,6 +58,7 @@ export interface BookingResult {
   bookedTime?: string;
   confirmationCode?: string;
   error?: string;
+  timeToBookMs?: number;  // ms between booking window opening and successful reservation
 }
 
 export interface BookingAttempt {

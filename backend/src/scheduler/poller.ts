@@ -1,10 +1,46 @@
-import { getAvailability, bookReservation } from '../api/resy-client.js';
+import { getAvailability, bookReservation, resyClient } from '../api/resy-client.js';
 import { addBookingAttempt } from '../database.js';
 import { broadcastToFrontend } from '../ws.js';
 import type { ReservationRequest, BookingResult, AvailableSlot } from '../../../shared/src/types.js';
 
 const MAX_RETRIES = 5;
-const RETRY_DELAY_MS = 3000;
+const RETRY_DELAY_MS = 500; // Keep tight — slots disappear in seconds on busy nights
+
+// ─── Prewarm Cache ──────────────────────────────────────────────────────────
+// The scheduler populates both caches ~500ms before the fire time:
+//   - prewarmCache: slots from /4/find  (~400ms saved)
+//   - bookTokenCache: book_token from /3/details  (~1.5s saved)
+const prewarmCache = new Map<string, { slots: AvailableSlot[]; fetchedAt: number }>();
+const bookTokenCache = new Map<string, { token: string; slotId: string; fetchedAt: number }>();
+
+/** Called by the scheduler with /4/find results just before fire time. */
+export function setPrewarmedSlots(reservationId: string, slots: AvailableSlot[]): void {
+  prewarmCache.set(reservationId, { slots, fetchedAt: Date.now() });
+}
+
+/** Called by the scheduler with the /3/details book_token just before fire time. */
+export function setPrewarmedBookToken(reservationId: string, token: string, slotId: string): void {
+  bookTokenCache.set(reservationId, { token, slotId, fetchedAt: Date.now() });
+}
+
+/** Consume cached slots (one-shot, 3s TTL, must be non-empty to count as a hit). */
+function consumePrewarmedSlots(reservationId: string): AvailableSlot[] | null {
+  const cached = prewarmCache.get(reservationId);
+  prewarmCache.delete(reservationId);
+  if (!cached || cached.slots.length === 0) return null;
+  if (Date.now() - cached.fetchedAt > 3000) return null;
+  return cached.slots;
+}
+
+/** Consume cached book_token (one-shot, 30s TTL to stay well within Resy's expiry). */
+function consumePrewarmedBookToken(reservationId: string, currentSlotId: string): string | null {
+  const cached = bookTokenCache.get(reservationId);
+  bookTokenCache.delete(reservationId);
+  if (!cached) return null;
+  if (cached.slotId !== currentSlotId) return null; // slot changed (e.g. it disappeared)
+  if (Date.now() - cached.fetchedAt > 30_000) return null; // stale
+  return cached.token;
+}
 
 /**
  * Attempt to book a reservation up to MAX_RETRIES times.
@@ -23,17 +59,30 @@ export async function bookWithRetry(reservation: ReservationRequest): Promise<Bo
     console.log(`🎯 Booking attempt ${attempt}/${MAX_RETRIES} for ${reservation.restaurantName}...`);
 
     try {
-      // 1. Get available slots
-      const slots = await getAvailability(
-        reservation.restaurantId,
-        reservation.targetDate,
-        reservation.partySize
-      );
+      // Use prewarm cache on first attempt to eliminate the /4/find and /3/details round-trips.
+      // Run payment fetch in parallel with availability — even if both are cache misses,
+      // the two ~400ms fetches overlap instead of stacking.
+      const prewarmHit = attempt === 1 ? consumePrewarmedSlots(reservation.id) : null;
+      const cachedPaymentId = reservation.credentials?.paymentMethodId;
 
+      const availabilityFetch = prewarmHit
+        ? Promise.resolve(prewarmHit)
+        : getAvailability(reservation.restaurantId, reservation.targetDate, reservation.partySize);
+
+      const paymentFetch = cachedPaymentId != null
+        ? Promise.resolve(cachedPaymentId)
+        : resyClient.getPaymentMethodId(authToken);
+
+      const [slots, resolvedPaymentId] = await Promise.all([availabilityFetch, paymentFetch]);
+
+      if (prewarmHit) console.log(`⚡ Used prewarm cache (${slots.length} slots, skipped /4/find)`);
+      if (cachedPaymentId != null) console.log(`💳 Used cached payment ID (skipped /2/user)`);
+
+      const slots_log = prewarmHit ? `prewarm (${slots.length})` : `fresh (${slots.length})`;
       logAttempt(reservation.id, {
         action: 'found_slot',
         slotDate: reservation.targetDate,
-        message: `Attempt ${attempt}: found ${slots.length} slots`,
+        message: `Attempt ${attempt}: found ${slots.length} slots (${slots_log})`,
         details: { slotCount: slots.length, availableTimes: slots.map(s => s.time).slice(0, 10) },
       });
 
@@ -56,16 +105,26 @@ export async function bookWithRetry(reservation: ReservationRequest): Promise<Bo
         continue;
       }
 
-      // 3. Attempt to book
+      // 3. Attempt to book — use cached book_token on first attempt to skip /3/details
+      const cachedBookToken = attempt === 1 ? consumePrewarmedBookToken(reservation.id, slot.slotId) : null;
+      if (cachedBookToken) console.log(`⚡ Used cached book_token (skipped /3/details)`);
+
       logAttempt(reservation.id, {
         action: 'booking',
         slotTime: slot.time,
         slotDate: slot.date,
-        message: `Attempt ${attempt}: booking slot at ${slot.time}`,
+        message: `Attempt ${attempt}: booking slot at ${slot.time}${cachedBookToken ? ' (cached book_token)' : ''}`,
         details: { slotId: slot.slotId, partySize: reservation.partySize },
       });
 
-      const result = await bookReservation(slot.slotId, reservation.partySize, reservation.restaurantId, authToken);
+      const result = await bookReservation(
+        slot.slotId,
+        reservation.partySize,
+        reservation.restaurantId,
+        authToken,
+        resolvedPaymentId ?? undefined,
+        cachedBookToken ?? undefined,
+      );
 
       logAttempt(reservation.id, {
         action: 'success',
@@ -148,7 +207,7 @@ function logAttempt(
   });
 }
 
-function findBestSlot(
+export function findBestSlot(
   slots: AvailableSlot[],
   startTime: string,
   endTime: string,
