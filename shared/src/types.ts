@@ -31,6 +31,7 @@ export interface ReservationRequest {
   result?: BookingResult;
   bookingAttempts?: BookingAttempt[]; // Log of all booking attempts
   bookingWindow?: BookingWindow; // When reservations open
+  tokenStatus?: 'valid' | 'invalid' | 'unknown'; // Proactively checked daily
 }
 
 export interface TimeRange {

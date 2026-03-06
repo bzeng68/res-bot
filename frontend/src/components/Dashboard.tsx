@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { Clock, Calendar, Users, Trash2, CheckCircle, XCircle, Loader, Edit2, Save, X, ChevronDown, ChevronUp, Copy, Check, RefreshCw } from 'lucide-react';
+import { Clock, Calendar, Users, Trash2, CheckCircle, XCircle, Loader, Edit2, Save, X, ChevronDown, ChevronUp, Copy, Check, RefreshCw, AlertTriangle } from 'lucide-react';
 import dayjs from 'dayjs';
 import relativeTime from 'dayjs/plugin/relativeTime';
 import { getAllReservations, deleteReservation, updateReservation, connectWebSocket } from '../api/client';
@@ -259,6 +259,16 @@ export default function Dashboard({ refreshTrigger }: Props) {
                     </div>
                     <div className="text-blue-700 text-xs mt-1">
                       {dayjs(reservation.scheduledPollTime).format('MMM D, YYYY [at] h:mm A')}
+                    </div>
+                  </div>
+                )}
+
+                {reservation.tokenStatus === 'invalid' && reservation.status === 'scheduled' && (
+                  <div className="bg-orange-50 border border-orange-200 rounded-lg p-3 text-sm flex items-start gap-2 mt-2">
+                    <AlertTriangle size={16} className="text-orange-500 shrink-0 mt-0.5" />
+                    <div>
+                      <div className="font-medium text-orange-900">Auth token may be expired</div>
+                      <div className="text-orange-700 text-xs mt-0.5">Re-paste your Resy token before the booking window opens — go to resy.com, open DevTools → Application → Local Storage and copy the <code className="bg-orange-100 px-1 rounded">authToken</code> value.</div>
                     </div>
                   </div>
                 )}

@@ -281,6 +281,25 @@ export async function getBookToken(slotToken: string, partySize: number, venueId
   return resyClient.getBookToken(slotToken, partySize, venueId, authToken);
 }
 
+/** Returns true if the auth token is still accepted by Resy, false on 401/403. */
+export async function validateToken(authToken: string): Promise<boolean> {
+  try {
+    await axios.get(`${RESY_BASE_URL}/2/user`, {
+      headers: {
+        'Authorization': `ResyAPI api_key="${RESY_API_KEY}"`,
+        'X-Resy-Auth-Token': authToken,
+        'X-Resy-Universal-Auth': authToken,
+        'Accept': 'application/json, text/plain, */*',
+      },
+    });
+    return true;
+  } catch (err: any) {
+    if (err.response?.status === 401 || err.response?.status === 403) return false;
+    // Network error / 5xx — assume valid rather than falsely alarming user
+    return true;
+  }
+}
+
 export async function bookReservation(slotToken: string, partySize: number, venueId: string, authToken: string, paymentMethodId?: number, bookToken?: string) {
   return resyClient.bookReservation(slotToken, partySize, venueId, authToken, paymentMethodId, bookToken);
 }

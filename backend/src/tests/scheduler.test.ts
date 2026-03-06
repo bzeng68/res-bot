@@ -66,7 +66,9 @@ describe('scheduler', () => {
     scheduler = await esmock('../scheduler/index.ts', {
       '../database.js': {
         getActiveReservations: fakeGetActiveReservations,
+        getAllReservations: sinon.stub().returns([]),
         updateReservationStatus: fakeUpdateReservationStatus,
+        updateReservation: sinon.stub(),
       },
       '../ws.js': {
         wss: { clients: new Set() },
@@ -81,6 +83,7 @@ describe('scheduler', () => {
       '../api/resy-client.js': {
         getAvailability: sinon.stub().resolves([]),
         getBookToken: sinon.stub().resolves('tok-prewarm'),
+        validateToken: sinon.stub().resolves(true),
       },
       'node-cron': {
         default: { schedule: sinon.stub() }, // prevent real cron from starting
