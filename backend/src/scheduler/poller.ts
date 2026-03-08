@@ -274,14 +274,30 @@ export function findBestSlot(
 
   if (valid.length === 0) return null;
 
+  const diningRoom = valid.filter(s => s.tableType?.toLowerCase().includes('dining room'));
+  const other = valid.filter(s => !s.tableType?.toLowerCase().includes('dining room'));
+
+  // Priority:
+  // 1. Dining Room + preferred time (in preference order)
+  // 2. Dining Room + any time
+  // 3. Other tables + preferred time (in preference order)
+  // 4. Other tables + first valid
+
   if (preferredTimes?.length) {
     for (const t of preferredTimes) {
-      const match = valid.find(s => s.time === t);
+      const match = diningRoom.find(s => s.time === t);
       if (match) return match;
     }
   }
+  if (diningRoom.length > 0) return diningRoom[0];
 
-  return valid[0];
+  if (preferredTimes?.length) {
+    for (const t of preferredTimes) {
+      const match = other.find(s => s.time === t);
+      if (match) return match;
+    }
+  }
+  return other[0] ?? null;
 }
 
 function timeToMinutes(time: string): number {

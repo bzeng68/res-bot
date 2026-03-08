@@ -98,6 +98,7 @@ class ResyClient {
           time: timeString,
           date,
           partySize: slot.party_size,
+          tableType: slot.config?.type as string | undefined,
           slotId: slot.config.token,
         };
       });

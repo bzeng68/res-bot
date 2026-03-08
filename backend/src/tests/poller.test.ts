@@ -8,11 +8,12 @@ import type { AvailableSlot } from '../../../shared/src/types.js';
 // Helpers
 // ---------------------------------------------------------------------------
 
-function makeSlot(time: string, slotId?: string): AvailableSlot {
+function makeSlot(time: string, slotId?: string, tableType?: string): AvailableSlot {
   return {
     time,
     date: '2026-04-04',
     partySize: 2,
+    tableType,
     slotId: slotId ?? `slot-${time}`,
   };
 }
@@ -104,6 +105,43 @@ describe('poller', () => {
       const slots = [makeSlot('18:00', 'slot-A'), makeSlot('19:00', 'slot-B')];
       const exclude = new Set(['slot-A', 'slot-B']);
       assert.isNull(findBestSlot(slots, '18:00', '21:00', undefined, exclude));
+    });
+
+    it('prefers Dining Room over a preferred time at a non-dining-room table', () => {
+      const slots = [
+        makeSlot('18:00', 'slot-A', 'Bar'),       // preferred time, but Bar
+        makeSlot('19:00', 'slot-B', 'Dining Room'), // not preferred, but Dining Room
+      ];
+      const result = findBestSlot(slots, '18:00', '21:00', ['18:00']);
+      assert.equal(result?.slotId, 'slot-B', 'Dining Room at 19:00 should beat Bar at preferred 18:00');
+    });
+
+    it('picks preferred time within Dining Room when available', () => {
+      const slots = [
+        makeSlot('18:00', 'slot-A', 'Dining Room'),
+        makeSlot('19:00', 'slot-B', 'Dining Room'),
+        makeSlot('19:00', 'slot-C', 'Bar'),
+      ];
+      const result = findBestSlot(slots, '18:00', '21:00', ['19:00']);
+      assert.equal(result?.slotId, 'slot-B', 'should pick Dining Room at 19:00 (preferred)');
+    });
+
+    it('falls back to preferred time at other table when no Dining Room exists', () => {
+      const slots = [
+        makeSlot('18:00', 'slot-A', 'Bar'),
+        makeSlot('19:00', 'slot-B', 'Bar'),
+      ];
+      const result = findBestSlot(slots, '18:00', '21:00', ['19:00']);
+      assert.equal(result?.slotId, 'slot-B', 'should pick preferred time at Bar when no Dining Room');
+    });
+
+    it('falls back to first valid non-dining-room slot when nothing preferred exists', () => {
+      const slots = [
+        makeSlot('18:00', 'slot-A', 'Bar'),
+        makeSlot('19:00', 'slot-B', 'Patio'),
+      ];
+      const result = findBestSlot(slots, '18:00', '21:00');
+      assert.equal(result?.slotId, 'slot-A');
     });
   });
 });
