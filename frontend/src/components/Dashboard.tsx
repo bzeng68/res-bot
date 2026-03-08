@@ -250,6 +250,24 @@ export default function Dashboard({ refreshTrigger }: Props) {
                   </div>
                 </div>
 
+                {reservation.timeRange.preferredTimes && reservation.timeRange.preferredTimes.length > 0 && (
+                  <div className="flex items-center gap-2 text-sm text-gray-600 mb-3">
+                    <span className="text-gray-500">Preferred:</span>
+                    <div className="flex flex-wrap gap-1">
+                      {reservation.timeRange.preferredTimes.map((t, i) => (
+                        <span key={t} className="flex items-center gap-1">
+                          <span className="bg-blue-100 text-blue-700 text-xs font-medium px-2 py-0.5 rounded">
+                            {t}
+                          </span>
+                          {i < reservation.timeRange.preferredTimes!.length - 1 && (
+                            <span className="text-gray-400 text-xs">→</span>
+                          )}
+                        </span>
+                      ))}
+                    </div>
+                  </div>
+                )}
+
                 {reservation.scheduledPollTime && reservation.status === 'scheduled' && (
                   <div className="bg-blue-50 rounded-lg p-3 text-sm">
                     <div className="font-medium text-blue-900">

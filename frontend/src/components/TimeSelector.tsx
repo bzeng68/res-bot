@@ -15,7 +15,7 @@ const TIME_OPTIONS = [
 ];
 
 export default function TimeSelector({ value, onChange }: Props) {
-  const [showPreferred, setShowPreferred] = useState(false);
+  const [showPreferred, setShowPreferred] = useState(true);
 
   const handleStartChange = (start: string) => {
     onChange({ ...value, start });
