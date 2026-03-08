@@ -55,49 +55,82 @@ export async function bookWithRetry(reservation: ReservationRequest): Promise<Bo
     return { success: false, error: msg };
   }
 
+  // Slot pool persisted across attempts. On a 404 (slot taken), we immediately try
+  // the next untried slot from the same already-fetched pool at zero delay.
+  // Only sleep + re-fetch /4/find when the pool is fully exhausted.
+  let currentSlots: AvailableSlot[] | null = null;
+  let resolvedPaymentId: number | null = null; // reused across attempts — never changes
+  const failedSlotIds = new Set<string>();      // slots attempted this session
+  let currentSlot: AvailableSlot | null = null; // visible to catch block
+
   for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
     console.log(`🎯 Booking attempt ${attempt}/${MAX_RETRIES} for ${reservation.restaurantName}...`);
 
     try {
-      // Use prewarm cache on first attempt to eliminate the /4/find and /3/details round-trips.
-      // Run payment fetch in parallel with availability — even if both are cache misses,
-      // the two ~400ms fetches overlap instead of stacking.
-      const prewarmHit = attempt === 1 ? consumePrewarmedSlots(reservation.id) : null;
-      const cachedPaymentId = reservation.credentials?.paymentMethodId;
+      // ── 1. Get slots ──────────────────────────────────────────────────────
+      const hasUntriedSlots = currentSlots?.some(s => !failedSlotIds.has(s.slotId)) ?? false;
+      let slotsSource = '';
 
-      const availabilityFetch = prewarmHit
-        ? Promise.resolve(prewarmHit)
-        : getAvailability(reservation.restaurantId, reservation.targetDate, reservation.partySize);
+      if (!hasUntriedSlots) {
+        // Pool exhausted (or first attempt) — fetch fresh
+        const prewarmHit = attempt === 1 ? consumePrewarmedSlots(reservation.id) : null;
+        const cachedPaymentId = reservation.credentials?.paymentMethodId;
 
-      const paymentFetch = cachedPaymentId != null
-        ? Promise.resolve(cachedPaymentId)
-        : resyClient.getPaymentMethodId(authToken);
+        const availabilityFetch = prewarmHit
+          ? Promise.resolve(prewarmHit)
+          : getAvailability(reservation.restaurantId, reservation.targetDate, reservation.partySize);
 
-      const [slots, resolvedPaymentId] = await Promise.all([availabilityFetch, paymentFetch]);
+        const paymentFetch = resolvedPaymentId != null
+          ? Promise.resolve(resolvedPaymentId)
+          : cachedPaymentId != null
+            ? Promise.resolve(cachedPaymentId)
+            : resyClient.getPaymentMethodId(authToken);
 
-      if (prewarmHit) console.log(`⚡ Used prewarm cache (${slots.length} slots, skipped /4/find)`);
-      if (cachedPaymentId != null) console.log(`💳 Used cached payment ID (skipped /2/user)`);
+        const [freshSlots, paymentId] = await Promise.all([availabilityFetch, paymentFetch]);
+        currentSlots = freshSlots;
+        resolvedPaymentId = paymentId;
+        failedSlotIds.clear(); // fresh pool — all slots eligible again
 
-      const slots_log = prewarmHit ? `prewarm (${slots.length})` : `fresh (${slots.length})`;
-      logAttempt(reservation.id, {
-        action: 'found_slot',
-        slotDate: reservation.targetDate,
-        message: `Attempt ${attempt}: found ${slots.length} slots (${slots_log})`,
-        details: { slotCount: slots.length, availableTimes: slots.map(s => s.time).slice(0, 10) },
-      });
+        if (prewarmHit) {
+          console.log(`⚡ Used prewarm cache (${freshSlots.length} slots, skipped /4/find)`);
+          slotsSource = `prewarm (${freshSlots.length})`;
+        } else {
+          slotsSource = `fresh (${freshSlots.length})`;
+        }
+        if (cachedPaymentId != null && attempt === 1) console.log(`💳 Used cached payment ID (skipped /2/user)`);
+      } else {
+        const remaining = currentSlots!.filter(s => !failedSlotIds.has(s.slotId)).length;
+        slotsSource = `pool (${remaining} untried)`;
+      }
 
-      // 2. Find a slot in the requested time range
-      const slot = findBestSlot(
+      const slots = currentSlots!;
+
+      // ── 2. Find best untried slot ─────────────────────────────────────────
+      currentSlot = findBestSlot(
         slots,
         reservation.timeRange.start,
         reservation.timeRange.end,
-        reservation.timeRange.preferredTimes
+        reservation.timeRange.preferredTimes,
+        failedSlotIds,
       );
 
-      if (!slot) {
+      logAttempt(reservation.id, {
+        action: 'found_slot',
+        slotDate: reservation.targetDate,
+        slotTime: currentSlot?.time,
+        message: `Attempt ${attempt}: found ${slots.length} slots (${slotsSource})`,
+        details: {
+          slotCount: slots.length,
+          availableTimes: slots.map(s => s.time).slice(0, 10),
+          selectedTime: currentSlot?.time ?? null,
+        },
+      });
+
+      if (!currentSlot) {
         const available = [...new Set(slots.map(s => s.time))].sort().join(', ') || 'none';
         const msg = `Attempt ${attempt}: no slot in ${reservation.timeRange.start}–${reservation.timeRange.end}. Available: ${available}`;
         logAttempt(reservation.id, { action: 'error', slotDate: reservation.targetDate, message: msg });
+        currentSlots = null; // force fresh fetch next attempt
         if (attempt < MAX_RETRIES) {
           console.log(`⏳ Retrying in ${RETRY_DELAY_MS / 1000}s...`);
           await sleep(RETRY_DELAY_MS);
@@ -105,20 +138,23 @@ export async function bookWithRetry(reservation: ReservationRequest): Promise<Bo
         continue;
       }
 
-      // 3. Attempt to book — use cached book_token on first attempt to skip /3/details
-      const cachedBookToken = attempt === 1 ? consumePrewarmedBookToken(reservation.id, slot.slotId) : null;
+      // Mark as attempted before booking so the catch block can see it
+      failedSlotIds.add(currentSlot.slotId);
+
+      // ── 3. Book the slot ──────────────────────────────────────────────────
+      const cachedBookToken = attempt === 1 ? consumePrewarmedBookToken(reservation.id, currentSlot.slotId) : null;
       if (cachedBookToken) console.log(`⚡ Used cached book_token (skipped /3/details)`);
 
       logAttempt(reservation.id, {
         action: 'booking',
-        slotTime: slot.time,
-        slotDate: slot.date,
-        message: `Attempt ${attempt}: booking slot at ${slot.time}${cachedBookToken ? ' (cached book_token)' : ''}`,
-        details: { slotId: slot.slotId, partySize: reservation.partySize },
+        slotTime: currentSlot.time,
+        slotDate: currentSlot.date,
+        message: `Attempt ${attempt}: booking slot at ${currentSlot.time}${cachedBookToken ? ' (cached book_token)' : ''}`,
+        details: { slotId: currentSlot.slotId, partySize: reservation.partySize },
       });
 
       const result = await bookReservation(
-        slot.slotId,
+        currentSlot.slotId,
         reservation.partySize,
         reservation.restaurantId,
         authToken,
@@ -128,8 +164,8 @@ export async function bookWithRetry(reservation: ReservationRequest): Promise<Bo
 
       logAttempt(reservation.id, {
         action: 'success',
-        slotTime: slot.time,
-        slotDate: slot.date,
+        slotTime: currentSlot.time,
+        slotDate: currentSlot.date,
         message: `Successfully booked on attempt ${attempt}`,
         details: { confirmationCode: result.confirmationCode },
       });
@@ -168,6 +204,19 @@ export async function bookWithRetry(reservation: ReservationRequest): Promise<Bo
           data: { reservationId: reservation.id, status: 'failed', error: authErr },
         });
         return { success: false, error: authErr };
+      }
+
+      // 404 = slot was grabbed just before our POST. Try the next untried slot from
+      // the same already-fetched pool immediately — no sleep, no refetch.
+      if (httpStatus === 404 && currentSlots) {
+        const remaining = currentSlots.filter(s => !failedSlotIds.has(s.slotId)).length;
+        if (remaining > 0 && attempt < MAX_RETRIES) {
+          console.log(`↩️ Slot at ${currentSlot?.time} taken — trying next slot immediately (${remaining} left in pool)`);
+          continue;
+        }
+        // Pool exhausted — force a fresh /4/find next attempt
+        currentSlots = null;
+        failedSlotIds.clear();
       }
 
       if (attempt < MAX_RETRIES) {
@@ -211,12 +260,14 @@ export function findBestSlot(
   slots: AvailableSlot[],
   startTime: string,
   endTime: string,
-  preferredTimes?: string[]
+  preferredTimes?: string[],
+  excludeSlotIds?: Set<string>,
 ): AvailableSlot | null {
   const startMin = timeToMinutes(startTime);
   const endMin = timeToMinutes(endTime);
 
   const valid = slots.filter(s => {
+    if (excludeSlotIds?.has(s.slotId)) return false;
     const m = timeToMinutes(s.time);
     return m >= startMin && m <= endMin;
   });

@@ -18,6 +18,16 @@ const scheduledJobs = new Map<string, NodeJS.Timeout>();
 // and survive server restarts (cron re-picks within 10 min).
 const SCHEDULE_HORIZON_MS = 10 * 60 * 1000; // 10 minutes
 
+// How many ms after the booking window opens to start the prewarm fetch.
+// Must be >0 so Resy's server has finished processing the release (our clock
+// can drift a few ms). 50ms is the minimum safe threshold.
+const PREWARM_AFTER_WINDOW_MS = 50;
+
+// If the prewarm errors or returns no slots, this fallback fires the booking
+// directly (fresh fetches on the critical path). Needs to be >> PREWARM_AFTER_WINDOW_MS
+// + round-trip time so the prewarm gets a fair chance to finish first.
+const FALLBACK_FIRE_MS = 2000;
+
 export function startScheduler() {
   cron.schedule('*/10 * * * * *', checkAndScheduleJobs);
   // Validate auth tokens for all upcoming reservations: once at startup, then daily at 9 AM
@@ -37,7 +47,8 @@ export function getFireTime(reservation: ReservationRequest): dayjs.Dayjs {
     .subtract(daysInAdvance, 'days')
     .hour(hours)
     .minute(minutes)
-    .second(1); // 1 second after the window opens
+    .second(0)
+    .millisecond(0); // exact moment the booking window opens
 }
 
 /** Exported for testing. Runs one scheduling pass over all active reservations. */
@@ -49,53 +60,77 @@ export function checkAndScheduleJobs() {
     if (reservation.status === 'booked' || reservation.status === 'failed') continue;
     if (scheduledJobs.has(reservation.id)) continue;
 
-    const fireAt = getFireTime(reservation);
-    const msUntilFire = Math.max(0, fireAt.diff(now, 'milliseconds'));
+    const windowOpensAt = getFireTime(reservation);
+    const msUntilWindowOpens = Math.max(0, windowOpensAt.diff(now, 'milliseconds'));
 
     // If more than 10 minutes away, hold off — will be picked up in a future tick
-    if (msUntilFire > SCHEDULE_HORIZON_MS) continue;
+    if (msUntilWindowOpens > SCHEDULE_HORIZON_MS) continue;
 
-    if (msUntilFire === 0) {
+    if (msUntilWindowOpens === 0) {
       console.log(`⚡ Booking window already open for ${reservation.restaurantName} — firing now`);
     } else {
       console.log(
-        `📅 Scheduling ${reservation.restaurantName} to fire at ` +
-        `${fireAt.format('h:mm:ss A')} (in ${Math.round(msUntilFire / 1000)}s)`
+        `📅 Scheduling ${reservation.restaurantName} — window opens at ` +
+        `${windowOpensAt.format('h:mm:ss.SSS A')} (in ${(msUntilWindowOpens / 1000).toFixed(3)}s)`
       );
     }
 
-    const timeoutId = setTimeout(() => fire(reservation), msUntilFire);
-    scheduledJobs.set(reservation.id, timeoutId);
+    // Strategy: instead of a fixed fire delay that races against the prewarm,
+    // let the prewarm trigger fire() directly once slots + book_token are cached.
+    // A fallback timer fires if the prewarm errors or returns no slots.
+    // firedAlready prevents double-fire (e.g. with sinon fake timers in tests,
+    // or if prewarm completes just as the fallback fires in prod).
+    let firedAlready = false;
+    let fallbackId: NodeJS.Timeout | undefined;
 
-    // Pre-warm: fetch availability ~500ms early, then immediately pipeline /3/details
-    // for the best matching slot. By fire time both the slots and book_token are cached,
-    // leaving only POST /3/book on the critical path.
-    const prewarmDelay = Math.max(0, msUntilFire - 500);
+    function fireSafe() {
+      if (firedAlready) return;
+      firedAlready = true;
+      scheduledJobs.delete(reservation.id);
+      fire(reservation);
+    }
+
+    // Prewarm: fetches /4/find PREWARM_AFTER_WINDOW_MS after window opens (so slots
+    // are guaranteed to exist), then immediately pipelines /3/details for the best
+    // slot's book_token. Once both are cached, fires the booking immediately.
+    // When the window is already open, collapse both delays to 0 so the fallback
+    // fires immediately (prewarm will get [] from the stub in tests, or real slots
+    // in production where the window is already open).
+    const prewarmDelay = msUntilWindowOpens === 0 ? 0 : msUntilWindowOpens + PREWARM_AFTER_WINDOW_MS;
     setTimeout(async () => {
       try {
         const slots = await getAvailability(reservation.restaurantId, reservation.targetDate, reservation.partySize);
         setPrewarmedSlots(reservation.id, slots);
 
-        if (slots.length === 0) return; // Window not open yet — /4/find returned empty
+        if (slots.length === 0) return; // window not open yet — fallback handles it
         console.log(`🔥 Prewarm: ${slots.length} slots for ${reservation.restaurantName}`);
 
-        // Find the best slot and immediately fetch its book_token
         const bestSlot = findBestSlot(
           slots,
           reservation.timeRange.start,
           reservation.timeRange.end,
           reservation.timeRange.preferredTimes,
         );
-        if (!bestSlot) return; // No matching slot yet
+        if (!bestSlot) return; // no match in range — fallback fires
 
         const authToken = reservation.credentials?.authToken;
         if (!authToken) return;
 
         const bookToken = await getBookToken(bestSlot.slotId, reservation.partySize, reservation.restaurantId, authToken);
         setPrewarmedBookToken(reservation.id, bookToken, bestSlot.slotId);
-        console.log(`⚡ Prewarm complete: book_token cached for ${reservation.restaurantName}`);
-      } catch { /* non-critical, normal path will fetch */ }
+        console.log(`⚡ Prewarm complete — firing immediately for ${reservation.restaurantName}`);
+
+        clearTimeout(fallbackId);
+        fireSafe();
+      } catch { /* prewarm failed — fallback timer will handle it */ }
     }, prewarmDelay);
+
+    // Fallback: fires if prewarm fails, errors, or returns no slots
+    fallbackId = setTimeout(() => {
+      console.log(`⏰ Fallback fire for ${reservation.restaurantName} (prewarm did not complete in time)`);
+      fireSafe();
+    }, msUntilWindowOpens === 0 ? 0 : msUntilWindowOpens + FALLBACK_FIRE_MS);
+    scheduledJobs.set(reservation.id, fallbackId);
   }
 }
 
@@ -112,8 +147,7 @@ async function fire(reservation: ReservationRequest) {
   const result = await bookWithRetry(reservation);
 
   if (result.success) {
-    const windowOpenedAt = getFireTime(reservation).subtract(1, 'second');
-    result.timeToBookMs = Date.now() - windowOpenedAt.valueOf();
+    result.timeToBookMs = Date.now() - getFireTime(reservation).valueOf();
     updateReservationStatus(reservation.id, 'booked', result);
     broadcastUpdate(reservation.id, 'booking_success', {
       restaurantName: reservation.restaurantName,

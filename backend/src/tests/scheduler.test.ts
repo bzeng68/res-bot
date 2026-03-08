@@ -128,14 +128,14 @@ describe('scheduler', () => {
     });
 
     it('computes the correct delay in milliseconds', () => {
-      // releaseTime '10:05' UTC → fireAt = 2026-03-05T10:05:01Z → 301 000 ms from now
+      // releaseTime '10:05' UTC → window opens at 2026-03-05T10:05:00.000Z → 300 000 ms from now
       const reservation = makeReservation({
         bookingWindow: { daysInAdvance: 30, releaseTime: '10:05', timezone: 'UTC' },
       });
       const fireAt = scheduler.getFireTime(reservation);
       const msUntilFire = fireAt.diff(dayjs(NOW), 'milliseconds');
 
-      assert.closeTo(msUntilFire, 5 * 60 * 1000 + 1000, 500, 'delay should be ~5 minutes + 1 second');
+      assert.closeTo(msUntilFire, 5 * 60 * 1000, 500, 'delay should be ~5 minutes exactly');
     });
   });
 
@@ -150,7 +150,7 @@ describe('scheduler', () => {
 
       scheduler.checkAndScheduleJobs();
 
-      assert.equal(clock.countTimers(), 2, 'should have two pending timers (fire + prewarm)');
+      assert.equal(clock.countTimers(), 2, 'should have two pending timers (prewarm + fallback)');
       clock.tick(0);
       // Allow the async fire() to call bookWithRetry
       await Promise.resolve();
@@ -172,7 +172,7 @@ describe('scheduler', () => {
 
       scheduler.checkAndScheduleJobs();
 
-      assert.equal(clock.countTimers(), 2, 'should have two pending timers (fire + prewarm)');
+      assert.equal(clock.countTimers(), 2, 'should have two pending timers (prewarm + fallback)');
       clock.tick(4 * 60 * 1000);
       await Promise.resolve();
       assert.isFalse(fakeBookWithRetry.called, 'should not book before the window opens');
@@ -202,7 +202,7 @@ describe('scheduler', () => {
       scheduler.checkAndScheduleJobs();
       scheduler.checkAndScheduleJobs(); // second call should be a no-op
 
-      assert.equal(clock.countTimers(), 2, 'should still have exactly two timers (fire + prewarm)');
+      assert.equal(clock.countTimers(), 2, 'should still have exactly two timers (prewarm + fallback)');
     });
 
     it('skips reservations that are already booked or failed', () => {

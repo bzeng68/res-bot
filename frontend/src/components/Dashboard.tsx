@@ -458,7 +458,7 @@ export default function Dashboard({ refreshTrigger }: Props) {
                               {attempt.action.replace(/_/g, ' ').toUpperCase()}
                             </span>
                             <span className="text-gray-500">
-                              {dayjs(attempt.timestamp).format('MMM D, h:mm:ss A')}
+                              {dayjs(attempt.timestamp).format('MMM D, h:mm:ss.SSS A')}
                             </span>
                           </div>
                           
@@ -517,6 +517,12 @@ export default function Dashboard({ refreshTrigger }: Props) {
                                       <span>{attempt.details.slotCount}</span>
                                     </div>
                                   )}
+                                  {attempt.details.selectedTime && (
+                                    <div className="text-xs">
+                                      <span className="font-semibold text-gray-700">Selected Time:</span>{' '}
+                                      <span className="text-blue-700 font-medium">🕐 {attempt.details.selectedTime}</span>
+                                    </div>
+                                  )}
                                   {attempt.details.availableTimes && attempt.details.availableTimes.length > 0 && (
                                     <div className="text-xs">
                                       <span className="font-semibold text-gray-700">Available Times:</span>{' '}
@@ -542,7 +548,7 @@ export default function Dashboard({ refreshTrigger }: Props) {
                                   <summary className="text-xs text-gray-500 cursor-pointer hover:text-gray-700">
                                     Show raw JSON
                                   </summary>
-                                  <pre className="mt-1 p-2 bg-white rounded text-xs overflow-x-auto border border-gray-300">
+                                  <pre className="mt-1 p-2 bg-white rounded text-xs overflow-x-auto border border-gray-300 text-gray-800">
                                     {JSON.stringify(attempt.details, null, 2)}
                                   </pre>
                                 </details>
