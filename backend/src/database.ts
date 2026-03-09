@@ -89,6 +89,12 @@ export function updateReservationStatus(
 ): void {
   const reservation = store.reservations.find(r => r.id === id);
   if (reservation) {
+    // Never overwrite a successful booking with a failure — can happen if two
+    // concurrent fire() calls race (one succeeds, the other retries and fails).
+    if (reservation.status === 'booked' && status === 'failed') {
+      console.warn(`⚠️ Ignoring status downgrade: ${id} is already 'booked', refusing to set 'failed'`);
+      return;
+    }
     reservation.status = status;
     if (result) {
       reservation.result = result;

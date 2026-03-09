@@ -196,6 +196,31 @@ export async function bookWithRetry(reservation: ReservationRequest): Promise<Bo
         details: { httpStatus, body: errBody },
       });
 
+      // 412 = Resy's "you already have a reservation" response.
+      // The body contains the reservation_id that was successfully created.
+      // Treat this as success — the booking went through on a prior attempt.
+      if (httpStatus === 412 && errBody?.specs?.reservation_id) {
+        const existingId = errBody.specs.reservation_id;
+        const bookedTime = errBody.specs.time_slot?.slice(0, 5) || currentSlot?.time || '';
+        console.log(`✅ HTTP 412 = already booked (reservation_id: ${existingId}) — treating as success`);
+        logAttempt(reservation.id, {
+          action: 'success',
+          slotTime: bookedTime,
+          slotDate: errBody.specs.day || reservation.targetDate,
+          message: `Already booked (reservation_id: ${existingId}) — confirmed via 412 response`,
+          details: { reservationId: existingId, bookedTime },
+        });
+        broadcastToFrontend({
+          type: 'BOOKING_UPDATE',
+          data: {
+            reservationId: reservation.id,
+            status: 'confirmed',
+            confirmationCode: String(existingId),
+          },
+        });
+        return { success: true, confirmationCode: String(existingId) };
+      }
+
       // Don't retry auth errors
       if (httpStatus === 401 || httpStatus === 403) {
         const authErr = `Authentication failed (HTTP ${httpStatus}). Your token may have expired.`;

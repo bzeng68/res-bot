@@ -14,6 +14,10 @@ dayjs.extend(timezone);
 // Reservations queued to fire (reservationId -> timeoutId)
 const scheduledJobs = new Map<string, NodeJS.Timeout>();
 
+// Module-level guard: ensures only one fire() runs per reservation at a time,
+// regardless of how many closures call fireSafe() (prewarm + fallback + cron re-entry).
+const firingJobs = new Set<string>();
+
 // Only schedule within this horizon to avoid huge setTimeout delays
 // and survive server restarts (cron re-picks within 10 min).
 const SCHEDULE_HORIZON_MS = 10 * 60 * 1000; // 10 minutes
@@ -59,6 +63,7 @@ export function checkAndScheduleJobs() {
   for (const reservation of reservations) {
     if (reservation.status === 'booked' || reservation.status === 'failed') continue;
     if (scheduledJobs.has(reservation.id)) continue;
+    if (firingJobs.has(reservation.id)) continue; // already firing — don't double-schedule
 
     const windowOpensAt = getFireTime(reservation);
     const msUntilWindowOpens = Math.max(0, windowOpensAt.diff(now, 'milliseconds'));
@@ -86,8 +91,12 @@ export function checkAndScheduleJobs() {
     function fireSafe() {
       if (firedAlready) return;
       firedAlready = true;
+      // Module-level guard catches any race between concurrent cron ticks or
+      // simultaneous prewarm+fallback fires (e.g. both setTimeout(0)).
+      if (firingJobs.has(reservation.id)) return;
+      firingJobs.add(reservation.id);
       scheduledJobs.delete(reservation.id);
-      fire(reservation);
+      fire(reservation).finally(() => firingJobs.delete(reservation.id));
     }
 
     // Prewarm: fetches /4/find PREWARM_AFTER_WINDOW_MS after window opens (so slots
