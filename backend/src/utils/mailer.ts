@@ -165,11 +165,14 @@ export async function sendFailureEmail(opts: {
             const color = actionColor[a.action] ?? '#374151';
             const label = actionLabel[a.action] ?? a.action;
             const slot = [a.slotTime, a.slotDate].filter(Boolean).join(' ');
+            const detailsJson = a.details && Object.keys(a.details).length > 0
+              ? JSON.stringify(a.details, null, 2)
+              : null;
             return `<tr style="background:${bg}">
-              <td style="padding:5px 8px;color:#6b7280;white-space:nowrap">${timeStr}</td>
-              <td style="padding:5px 8px"><span style="color:${color};font-weight:600">${label}</span></td>
-              <td style="padding:5px 8px;color:#374151">${slot}</td>
-              <td style="padding:5px 8px;color:#374151;word-break:break-word">${a.message}</td>
+              <td style="padding:5px 8px;color:#6b7280;white-space:nowrap;vertical-align:top">${timeStr}</td>
+              <td style="padding:5px 8px;vertical-align:top"><span style="color:${color};font-weight:600">${label}</span></td>
+              <td style="padding:5px 8px;color:#374151;vertical-align:top">${slot}</td>
+              <td style="padding:5px 8px;color:#374151;word-break:break-word;vertical-align:top">${a.message}${detailsJson ? `<br><pre style="margin:4px 0 0;padding:6px 8px;background:#f1f5f9;border-radius:4px;font-size:11px;color:#334155;white-space:pre-wrap;word-break:break-all">${detailsJson.replace(/</g,'&lt;').replace(/>/g,'&gt;')}</pre>` : ''}</td>
             </tr>`;
           }).join('')}
         </tbody>
