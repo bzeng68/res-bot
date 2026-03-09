@@ -2,10 +2,11 @@ import cron from 'node-cron';
 import dayjs from 'dayjs';
 import utc from 'dayjs/plugin/utc.js';
 import timezone from 'dayjs/plugin/timezone.js';
-import { getActiveReservations, getAllReservations, updateReservationStatus, updateReservation } from '../database.js';
+import { getActiveReservations, getAllReservations, getReservation, updateReservationStatus, updateReservation } from '../database.js';
 import { bookWithRetry, setPrewarmedSlots, setPrewarmedBookToken, findBestSlot } from './poller.js';
 import { getAvailability, getBookToken, validateToken } from '../api/resy-client.js';
 import { wss } from '../ws.js';
+import { sendSuccessEmail, sendFailureEmail } from '../utils/mailer.js';
 import type { ReservationRequest } from '../../../shared/src/types.js';
 
 dayjs.extend(utc);
@@ -164,6 +165,13 @@ async function fire(reservation: ReservationRequest) {
       confirmationCode: result.confirmationCode,
     });
     console.log(`✅ Booked ${reservation.restaurantName} — confirmation: ${result.confirmationCode}`);
+    sendSuccessEmail({
+      restaurantName: reservation.restaurantName,
+      targetDate: reservation.targetDate,
+      bookedTime: result.bookedTime,
+      confirmationCode: result.confirmationCode,
+      partySize: reservation.partySize,
+    }).catch(() => {/* already logged inside */});
   } else {
     updateReservationStatus(reservation.id, 'failed', result);
     broadcastUpdate(reservation.id, 'booking_failed', {
@@ -171,6 +179,13 @@ async function fire(reservation: ReservationRequest) {
       error: result.error,
     });
     console.log(`❌ Failed to book ${reservation.restaurantName}: ${result.error}`);
+    const failed = getReservation(reservation.id);
+    sendFailureEmail({
+      restaurantName: reservation.restaurantName,
+      targetDate: reservation.targetDate,
+      error: result.error,
+      attempts: failed?.bookingAttempts,
+    }).catch(() => {/* already logged inside */});
   }
 }
 
