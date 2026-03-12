@@ -180,7 +180,7 @@ export async function bookWithRetry(reservation: ReservationRequest): Promise<Bo
         },
       });
 
-      return { success: true, confirmationCode: result.confirmationCode };
+      return { success: true, confirmationCode: result.confirmationCode, bookedTime: currentSlot.time };
 
     } catch (err: any) {
       const httpStatus = err.response?.status;
