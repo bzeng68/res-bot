@@ -221,9 +221,10 @@ export async function bookWithRetry(reservation: ReservationRequest): Promise<Bo
         return { success: true, confirmationCode: String(existingId) };
       }
 
-      // Don't retry auth errors
-      if (httpStatus === 401 || httpStatus === 403) {
-        const authErr = `Authentication failed (HTTP ${httpStatus}). Your token may have expired.`;
+      // Don't retry auth errors.
+      // 401/403 = standard auth failure; 419 = Resy session/CSRF expired (also fatal).
+      if (httpStatus === 401 || httpStatus === 403 || httpStatus === 419) {
+        const authErr = `Authentication failed (HTTP ${httpStatus}). Your Resy token has expired — please update it and re-save the reservation.`;
         broadcastToFrontend({
           type: 'BOOKING_UPDATE',
           data: { reservationId: reservation.id, status: 'failed', error: authErr },

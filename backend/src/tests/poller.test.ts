@@ -1,8 +1,8 @@
-import { describe, it } from 'mocha';
+import { describe, it, before, after } from 'mocha';
 import { assert } from 'chai';
 import sinon from 'sinon';
 import esmock from 'esmock';
-import type { AvailableSlot } from '../../../shared/src/types.js';
+import type { AvailableSlot, ReservationRequest } from '../../../shared/src/types.js';
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -16,6 +16,29 @@ function makeSlot(time: string, slotId?: string, tableType?: string): AvailableS
     tableType,
     slotId: slotId ?? `slot-${time}`,
   };
+}
+
+function makeReservation(overrides?: Record<string, any>): ReservationRequest {
+  return {
+    id: 'res-1',
+    restaurantId: '64593',
+    restaurantName: 'Torrisi',
+    targetDate: '2026-04-10',
+    timeRange: { start: '17:30', end: '22:00', preferredTimes: ['18:00', '19:00'] },
+    partySize: 2,
+    userEmail: 'user@resy.com',
+    credentials: { platform: 'resy', authToken: 'valid-token' },
+    status: 'scheduled',
+    createdAt: '2026-03-11T02:06:11.675Z',
+    bookingWindow: { daysInAdvance: 30, releaseTime: '10:00', timezone: 'America/New_York' },
+    ...overrides,
+  } as ReservationRequest;
+}
+
+function makeAxiosError(status: number, body: object = {}) {
+  const err: any = new Error(`HTTP ${status}`);
+  err.response = { status, data: body };
+  return err;
 }
 
 // ---------------------------------------------------------------------------
@@ -142,6 +165,99 @@ describe('poller', () => {
       ];
       const result = findBestSlot(slots, '18:00', '21:00');
       assert.equal(result?.slotId, 'slot-A');
+    });
+  });
+
+  // -------------------------------------------------------------------------
+  // bookWithRetry — retry and bail-out behaviour
+  // -------------------------------------------------------------------------
+
+  describe('bookWithRetry', () => {
+    let pollerWithBookStub: any;
+    let bookReservationStub: sinon.SinonStub;
+    let getAvailabilityStub: sinon.SinonStub;
+    let getPaymentMethodIdStub: sinon.SinonStub;
+    let bookWithRetry: (r: ReservationRequest) => Promise<any>;
+
+    before(async () => {
+      bookReservationStub = sinon.stub();
+      getAvailabilityStub = sinon.stub();
+      getPaymentMethodIdStub = sinon.stub().resolves(42);
+
+      pollerWithBookStub = await esmock('../scheduler/poller.ts', {
+        '../api/resy-client.js': {
+          getAvailability: getAvailabilityStub,
+          bookReservation: bookReservationStub,
+          resyClient: { getPaymentMethodId: getPaymentMethodIdStub },
+        },
+        '../database.js': { addBookingAttempt: sinon.stub() },
+        '../ws.js': { broadcastToFrontend: sinon.stub() },
+      });
+      bookWithRetry = pollerWithBookStub.bookWithRetry;
+    });
+
+    after(() => { esmock.purge(pollerWithBookStub); });
+
+    beforeEach(() => {
+      bookReservationStub.reset();
+      getAvailabilityStub.reset();
+      getPaymentMethodIdStub.reset();
+      getPaymentMethodIdStub.resolves(42);
+    });
+
+    it('returns failure immediately on HTTP 419 without retrying', async () => {
+      getAvailabilityStub.resolves([makeSlot('22:00', 'slot-22')]);
+      bookReservationStub.rejects(makeAxiosError(419, { status: 419, message: 'Unauthorized' }));
+
+      const result = await bookWithRetry(makeReservation());
+
+      assert.isFalse(result.success);
+      assert.include(result.error, '419');
+      assert.equal(bookReservationStub.callCount, 1, 'should NOT retry after 419');
+    });
+
+    it('returns failure immediately on HTTP 401 without retrying', async () => {
+      getAvailabilityStub.resolves([makeSlot('18:00', 'slot-18')]);
+      bookReservationStub.rejects(makeAxiosError(401));
+
+      const result = await bookWithRetry(makeReservation());
+
+      assert.isFalse(result.success);
+      assert.equal(bookReservationStub.callCount, 1, 'should NOT retry after 401');
+    });
+
+    it('returns failure immediately on HTTP 403 without retrying', async () => {
+      getAvailabilityStub.resolves([makeSlot('18:00', 'slot-18')]);
+      bookReservationStub.rejects(makeAxiosError(403));
+
+      const result = await bookWithRetry(makeReservation());
+
+      assert.isFalse(result.success);
+      assert.equal(bookReservationStub.callCount, 1, 'should NOT retry after 403');
+    });
+
+    it('retries on HTTP 404 (slot taken) and picks next slot from pool', async () => {
+      getAvailabilityStub.resolves([
+        makeSlot('18:00', 'slot-18'),
+        makeSlot('19:00', 'slot-19'),
+      ]);
+      bookReservationStub
+        .onFirstCall().rejects(makeAxiosError(404))
+        .onSecondCall().resolves({ confirmationCode: 'CONF-OK', reservationDetails: {} });
+
+      const result = await bookWithRetry(makeReservation());
+
+      assert.isTrue(result.success);
+      assert.equal(result.confirmationCode, 'CONF-OK');
+      assert.equal(bookReservationStub.callCount, 2, 'should retry once after 404');
+    });
+
+    it('returns failure immediately when no auth token is present', async () => {
+      const result = await bookWithRetry(makeReservation({ credentials: { platform: 'resy' } }));
+
+      assert.isFalse(result.success);
+      assert.include(result.error, 'No Resy auth token');
+      assert.equal(bookReservationStub.callCount, 0);
     });
   });
 });

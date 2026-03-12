@@ -282,20 +282,33 @@ export async function getBookToken(slotToken: string, partySize: number, venueId
   return resyClient.getBookToken(slotToken, partySize, venueId, authToken);
 }
 
-/** Returns true if the auth token is still accepted by Resy, false on 401/403. */
+/**
+ * Returns true if the auth token is still accepted by Resy for booking operations.
+ *
+ * NOTE: Resy enforces different session expiry for reads vs. writes:
+ *   - GET /2/user (read)  — token stays valid for days/weeks
+ *   - POST /3/book (write) — Resy rejects the token with 419 after ~hours
+ *
+ * To catch write-level expiry we probe /2/user/payment_methods, which shares
+ * the same stricter auth requirement as /3/book. A 419 from either endpoint
+ * means the token is too stale to book even if /2/user still reads fine.
+ */
 export async function validateToken(authToken: string): Promise<boolean> {
+  const headers = {
+    'Authorization': `ResyAPI api_key="${RESY_API_KEY}"`,
+    'X-Resy-Auth-Token': authToken,
+    'X-Resy-Universal-Auth': authToken,
+    'Accept': 'application/json, text/plain, */*',
+  };
   try {
-    await axios.get(`${RESY_BASE_URL}/2/user`, {
-      headers: {
-        'Authorization': `ResyAPI api_key="${RESY_API_KEY}"`,
-        'X-Resy-Auth-Token': authToken,
-        'X-Resy-Universal-Auth': authToken,
-        'Accept': 'application/json, text/plain, */*',
-      },
-    });
+    // Probe a write-auth-level endpoint so we catch 419 session expiry
+    // before it kills the actual booking attempt.
+    await axios.get(`${RESY_BASE_URL}/2/user/payment_methods`, { headers });
     return true;
   } catch (err: any) {
-    if (err.response?.status === 401 || err.response?.status === 403) return false;
+    const status = err.response?.status;
+    // 401/403 = bad credentials; 419 = session expired for write operations
+    if (status === 401 || status === 403 || status === 419) return false;
     // Network error / 5xx — assume valid rather than falsely alarming user
     return true;
   }
