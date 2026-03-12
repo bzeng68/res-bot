@@ -61,26 +61,26 @@ describe('scheduler', () => {
 
     // Load the scheduler with all external dependencies mocked out so the
     // test process never connects to a database or starts a WebSocket server.
-    // First arg is relative to this test file (src/tests/ → src/scheduler/index.ts).
+    // First arg is relative to this test file (tests/ → src/scheduler/index.ts).
     // Mock keys are relative to the target module (src/scheduler/index.ts).
-    scheduler = await esmock('../scheduler/index.ts', {
-      '../database.js': {
+    scheduler = await esmock('../src/scheduler/index.ts', {
+      '../src/database.js': {
         getActiveReservations: fakeGetActiveReservations,
         getAllReservations: sinon.stub().returns([]),
         updateReservationStatus: fakeUpdateReservationStatus,
         updateReservation: sinon.stub(),
       },
-      '../ws.js': {
+      '../src/ws.js': {
         wss: { clients: new Set() },
         broadcastToFrontend: sinon.stub(),
       },
-      '../scheduler/poller.js': {
+      '../src/scheduler/poller.js': {
         bookWithRetry: fakeBookWithRetry,
         setPrewarmedSlots: sinon.stub(),
         setPrewarmedBookToken: sinon.stub(),
         findBestSlot: sinon.stub().returns(null), // prewarm bails out on null
       },
-      '../api/resy-client.js': {
+      '../src/api/resy-client.js': {
         getAvailability: sinon.stub().resolves([]),
         getBookToken: sinon.stub().resolves('tok-prewarm'),
         validateToken: sinon.stub().resolves(true),

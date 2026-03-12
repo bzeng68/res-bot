@@ -7,7 +7,7 @@
     "dev": "tsx watch src/index.ts",
     "build": "tsc",
     "start": "node dist/index.js",
-    "test": "NODE_OPTIONS='--import tsx/esm --no-warnings' mocha 'src/tests/**/*.test.ts'"
+    "test": "NODE_OPTIONS='--import tsx/esm --no-warnings' mocha 'tests/**/*.test.ts'"
   },
   "dependencies": {
     "axios": "^1.6.5",

@@ -2,7 +2,7 @@ import { describe, it, before, after } from 'mocha';
 import { assert } from 'chai';
 import sinon from 'sinon';
 import esmock from 'esmock';
-import type { AvailableSlot, ReservationRequest } from '../../../shared/src/types.js';
+import type { AvailableSlot, ReservationRequest } from '../../shared/src/types.js';
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -51,14 +51,14 @@ describe('poller', () => {
 
   before(async () => {
     // Load only the bits we need; stub out all I/O-touching dependencies.
-    poller = await esmock('../scheduler/poller.ts', {
-      '../api/resy-client.js': {
+    poller = await esmock('../src/scheduler/poller.ts', {
+      '../src/api/resy-client.js': {
         getAvailability: sinon.stub().resolves([]),
         bookReservation: sinon.stub().resolves({ confirmationCode: 'X', reservationDetails: {} }),
         resyClient: { getPaymentMethodId: sinon.stub().resolves(null) },
       },
-      '../database.js': { addBookingAttempt: sinon.stub() },
-      '../ws.js': { broadcastToFrontend: sinon.stub() },
+      '../src/database.js': { addBookingAttempt: sinon.stub() },
+      '../src/ws.js': { broadcastToFrontend: sinon.stub() },
     });
     findBestSlot = poller.findBestSlot;
   });
@@ -184,14 +184,14 @@ describe('poller', () => {
       getAvailabilityStub = sinon.stub();
       getPaymentMethodIdStub = sinon.stub().resolves(42);
 
-      pollerWithBookStub = await esmock('../scheduler/poller.ts', {
-        '../api/resy-client.js': {
+      pollerWithBookStub = await esmock('../src/scheduler/poller.ts', {
+        '../src/api/resy-client.js': {
           getAvailability: getAvailabilityStub,
           bookReservation: bookReservationStub,
           resyClient: { getPaymentMethodId: getPaymentMethodIdStub },
         },
-        '../database.js': { addBookingAttempt: sinon.stub() },
-        '../ws.js': { broadcastToFrontend: sinon.stub() },
+        '../src/database.js': { addBookingAttempt: sinon.stub() },
+        '../src/ws.js': { broadcastToFrontend: sinon.stub() },
       });
       bookWithRetry = pollerWithBookStub.bookWithRetry;
     });
