@@ -24,14 +24,14 @@ const firingJobs = new Set<string>();
 const SCHEDULE_HORIZON_MS = 10 * 60 * 1000; // 10 minutes
 
 // How many ms after the booking window opens to start the prewarm fetch.
-// Must be >0 so Resy's server has finished processing the release (our clock
-// can drift a few ms). 50ms is the minimum safe threshold.
-const PREWARM_AFTER_WINDOW_MS = 50;
+// 500ms gives Resy's server time to process the release before we query slots.
+const PREWARM_AFTER_WINDOW_MS = 500;
 
 // If the prewarm errors or returns no slots, this fallback fires the booking
-// directly (fresh fetches on the critical path). Needs to be >> PREWARM_AFTER_WINDOW_MS
-// + round-trip time so the prewarm gets a fair chance to finish first.
-const FALLBACK_FIRE_MS = 2000;
+// directly (fresh fetches on the critical path).
+// Pipeline: prewarm starts T+500ms, /4/find ~800ms, /3/details ~1500ms → done ~T+2800ms.
+// 3500ms gives ~700ms of headroom for the prewarm to beat the fallback.
+const FALLBACK_FIRE_MS = 3500;
 
 export function startScheduler() {
   cron.schedule('*/10 * * * * *', checkAndScheduleJobs);

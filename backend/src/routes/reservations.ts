@@ -91,7 +91,8 @@ router.post('/', async (req, res) => {
         .subtract(daysInAdvance, 'days')
         .hour(hours)
         .minute(minutes)
-        .second(1); // match getFireTime exactly
+        .second(0)
+        .millisecond(0); // exact window-open time — matches getFireTime()
       
       if (now.isAfter(bookingOpensAt)) {
         scheduledPollTime = now.toISOString();
