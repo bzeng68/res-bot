@@ -39,7 +39,7 @@ export default function TimeSelector({ value, onChange }: Props) {
     const current = value.preferredTimes || [];
     const newPreferred = current.includes(time)
       ? current.filter(t => t !== time)
-      : [...current, time].sort();
+      : [...current, time];
     
     onChange({ ...value, preferredTimes: newPreferred });
   };
