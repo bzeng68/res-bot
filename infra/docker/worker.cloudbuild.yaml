@@ -1,0 +1,10 @@
+# Builds and pushes the worker image via Cloud Build (no local Docker daemon
+# required). Run from the repo root:
+#
+#   gcloud builds submit --config=infra/docker/worker.cloudbuild.yaml \
+#     --substitutions=_IMAGE=us-central1-docker.pkg.dev/PROJECT_ID/res-bot/worker:latest .
+steps:
+  - name: 'gcr.io/cloud-builders/docker'
+    args: ['build', '-f', 'infra/docker/worker.Dockerfile', '-t', '${_IMAGE}', '.']
+images:
+  - '${_IMAGE}'

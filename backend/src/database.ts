@@ -1,80 +1,57 @@
-import fs from 'fs';
-import path from 'path';
-import { ReservationRequest, ReservationStatus, BookingAttempt, PlatformCredentials } from '../../shared/src/types.js';
+import { Firestore, FieldValue } from '@google-cloud/firestore';
+import { ReservationRequest, ReservationStatus, BookingAttempt } from '../../shared/src/types.js';
 import { encryptPassword, decryptPassword, isEncrypted } from './utils/crypto.js';
 
-const DATA_DIR = process.env.DATA_DIR || './data';
-const RESERVATIONS_FILE = path.join(DATA_DIR, 'reservations.json');
+const COLLECTION = 'reservations';
 
-interface DataStore {
-  reservations: ReservationRequest[];
-}
+let firestore: Firestore;
 
-let store: DataStore = { reservations: [] };
-
-// Initialize database
+// Initialize the Firestore client. Respects GOOGLE_APPLICATION_CREDENTIALS /
+// the Cloud Run runtime service account for auth, and FIRESTORE_EMULATOR_HOST
+// for local dev against the emulator — no code branching needed either way.
 export function initDatabase() {
-  // Create data directory if it doesn't exist
-  if (!fs.existsSync(DATA_DIR)) {
-    fs.mkdirSync(DATA_DIR, { recursive: true });
-  }
-
-  // Load existing data if file exists
-  if (fs.existsSync(RESERVATIONS_FILE)) {
-    try {
-      const data = fs.readFileSync(RESERVATIONS_FILE, 'utf-8');
-      store = JSON.parse(data);
-    } catch (error) {
-      console.error('Error loading data:', error);
-      store = { reservations: [] };
-    }
-  }
-
-  // Save initial empty store if file doesn't exist
-  if (!fs.existsSync(RESERVATIONS_FILE)) {
-    saveStore();
-  }
+  firestore = new Firestore({
+    projectId: process.env.GCP_PROJECT_ID,
+  });
 }
 
-function saveStore() {
-  fs.writeFileSync(RESERVATIONS_FILE, JSON.stringify(store, null, 2), 'utf-8');
+function col() {
+  return firestore.collection(COLLECTION);
 }
 
 // Reservation operations
-export function createReservation(reservation: ReservationRequest): void {
-  // Encrypt sensitive credentials before storing
-  const encryptedReservation = {
+export async function createReservation(reservation: ReservationRequest): Promise<void> {
+  const encrypted = {
     ...reservation,
     credentials: {
       ...reservation.credentials,
       authToken: encryptPassword(reservation.credentials.authToken),
     },
   };
-  
-  store.reservations.push(encryptedReservation);
-  saveStore();
+
+  // Optional fields (e.g. bookingWindow) may be explicitly `undefined` on the
+  // object literal rather than omitted — Firestore rejects literal undefined
+  // outright, at any nesting depth, so strip it recursively.
+  await col().doc(reservation.id).set(deepStripUndefined(encrypted));
 }
 
-export function getReservation(id: string): ReservationRequest | null {
-  const reservation = store.reservations.find(r => r.id === id);
-  if (!reservation) return null;
-  
-  // Decrypt password when retrieving
-  return decryptReservationCredentials(reservation);
+export async function getReservation(id: string): Promise<ReservationRequest | null> {
+  const snap = await col().doc(id).get();
+  if (!snap.exists) return null;
+
+  return decryptReservationCredentials(snap.data() as ReservationRequest);
 }
 
-export function getAllReservations(): ReservationRequest[] {
-  return [...store.reservations]
-    .map(decryptReservationCredentials)
-    .sort((a, b) => 
-      new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime()
-    );
+export async function getAllReservations(): Promise<ReservationRequest[]> {
+  const snap = await col().orderBy('createdAt', 'desc').get();
+  return snap.docs.map(d => decryptReservationCredentials(d.data() as ReservationRequest));
 }
 
-export function getActiveReservations(): ReservationRequest[] {
-  return store.reservations
-    .filter(r => r.status === 'scheduled' || r.status === 'polling')
-    .map(decryptReservationCredentials)
+export async function getActiveReservations(): Promise<ReservationRequest[]> {
+  const snap = await col().where('status', 'in', ['scheduled', 'polling']).get();
+
+  return snap.docs
+    .map(d => decryptReservationCredentials(d.data() as ReservationRequest))
     .sort((a, b) => {
       if (!a.scheduledPollTime) return 1;
       if (!b.scheduledPollTime) return -1;
@@ -82,83 +59,115 @@ export function getActiveReservations(): ReservationRequest[] {
     });
 }
 
-export function updateReservationStatus(
-  id: string, 
-  status: ReservationStatus, 
+export async function updateReservationStatus(
+  id: string,
+  status: ReservationStatus,
   result?: any
-): void {
-  const reservation = store.reservations.find(r => r.id === id);
-  if (reservation) {
+): Promise<void> {
+  const ref = col().doc(id);
+
+  await firestore.runTransaction(async tx => {
+    const snap = await tx.get(ref);
+    if (!snap.exists) return;
+
+    const current = snap.data() as ReservationRequest;
+
     // Never overwrite a successful booking with a failure — can happen if two
     // concurrent fire() calls race (one succeeds, the other retries and fails).
-    if (reservation.status === 'booked' && status === 'failed') {
+    if (current.status === 'booked' && status === 'failed') {
       console.warn(`⚠️ Ignoring status downgrade: ${id} is already 'booked', refusing to set 'failed'`);
       return;
     }
-    reservation.status = status;
-    if (result) {
-      reservation.result = result;
-    }
-    saveStore();
-  }
+
+    const updates: Record<string, unknown> = { status };
+    if (result) updates.result = deepStripUndefined(result);
+    tx.update(ref, updates);
+  });
 }
 
-export function updateReservation(
+export async function updateReservation(
   id: string,
   updates: Partial<ReservationRequest>
-): ReservationRequest | null {
-  const reservation = store.reservations.find(r => r.id === id);
-  if (!reservation) return null;
-  
-  // Merge updates, encrypting credentials if they're being updated
-  Object.assign(reservation, updates);
-  
+): Promise<ReservationRequest | null> {
+  const ref = col().doc(id);
+  const snap = await ref.get();
+  if (!snap.exists) return null;
+
+  const current = snap.data() as ReservationRequest;
+  const merged: Record<string, unknown> = { ...updates };
+
   // If credentials are being updated, encrypt them
   if (updates.credentials) {
-    reservation.credentials = {
+    merged.credentials = {
       platform: 'resy',
-      authToken: updates.credentials.authToken ? encryptPassword(updates.credentials.authToken) : reservation.credentials.authToken,
+      authToken: updates.credentials.authToken ? encryptPassword(updates.credentials.authToken) : current.credentials.authToken,
       ...(updates.credentials.paymentMethodId != null && { paymentMethodId: updates.credentials.paymentMethodId }),
     };
   }
-  
-  saveStore();
-  return decryptReservationCredentials(reservation);
+
+  await ref.update(sanitizeForFirestore(merged));
+
+  const updatedSnap = await ref.get();
+  return decryptReservationCredentials(updatedSnap.data() as ReservationRequest);
 }
 
-export function deleteReservation(id: string): void {
-  store.reservations = store.reservations.filter(r => r.id !== id);
-  saveStore();
+export async function deleteReservation(id: string): Promise<void> {
+  await col().doc(id).delete();
 }
 
-export function addBookingAttempt(
-  id: string,
-  attempt: BookingAttempt
-): void {
-  const reservation = store.reservations.find(r => r.id === id);
-  if (reservation) {
-    if (!reservation.bookingAttempts) {
-      reservation.bookingAttempts = [];
-    }
-    reservation.bookingAttempts.push(attempt);
-    
-    // Keep only last 50 attempts to avoid bloat
-    if (reservation.bookingAttempts.length > 50) {
-      reservation.bookingAttempts = reservation.bookingAttempts.slice(-50);
-    }
-    
-    saveStore();
+export async function addBookingAttempt(id: string, attempt: BookingAttempt): Promise<void> {
+  const ref = col().doc(id);
+
+  await firestore.runTransaction(async tx => {
+    const snap = await tx.get(ref);
+    if (!snap.exists) return;
+
+    const current = snap.data() as ReservationRequest;
+    // Keep only last 50 attempts to avoid bloat. attempt.details is
+    // arbitrary caller-provided data (e.g. { httpStatus, body } where
+    // httpStatus is undefined for non-HTTP errors) — strip undefined
+    // recursively or Firestore rejects the whole write.
+    const attempts = [...(current.bookingAttempts ?? []), attempt].slice(-50);
+    tx.update(ref, { bookingAttempts: deepStripUndefined(attempts) });
+  });
+}
+
+// A caller passing `undefined` for a TOP-LEVEL field (e.g. to reset `result`
+// on retry) means "clear this field" — translate that into FieldValue.delete(),
+// which is only valid for update()/merge-set(), not plain .set(). Nested
+// undefined (e.g. inside `credentials` or `bookingAttempts[].details`) has no
+// such special meaning and no delete-sentinel equivalent — Firestore just
+// rejects it outright — so strip it recursively instead.
+function sanitizeForFirestore(updates: Record<string, unknown>): Record<string, unknown> {
+  const out: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(updates)) {
+    out[key] = value === undefined ? FieldValue.delete() : deepStripUndefined(value);
   }
+  return out;
+}
+
+function deepStripUndefined<T>(value: T): T {
+  if (Array.isArray(value)) {
+    return value.map(deepStripUndefined) as unknown as T;
+  }
+  if (value !== null && typeof value === 'object') {
+    const out: Record<string, unknown> = {};
+    for (const [key, v] of Object.entries(value as Record<string, unknown>)) {
+      if (v !== undefined) out[key] = deepStripUndefined(v);
+    }
+    return out as T;
+  }
+  return value;
 }
 
 // Helper function to decrypt credentials when reading
 function decryptReservationCredentials(reservation: ReservationRequest): ReservationRequest {
   try {
-    const decryptedCredentials: PlatformCredentials = {
+    const decryptedCredentials: ReservationRequest['credentials'] = {
       platform: 'resy',
       authToken: '',
     };
-    
+
     // Decrypt authToken if present and encrypted
     if (reservation.credentials.authToken && isEncrypted(reservation.credentials.authToken)) {
       decryptedCredentials.authToken = decryptPassword(reservation.credentials.authToken);
@@ -170,7 +179,7 @@ function decryptReservationCredentials(reservation: ReservationRequest): Reserva
     if (reservation.credentials.paymentMethodId != null) {
       decryptedCredentials.paymentMethodId = reservation.credentials.paymentMethodId;
     }
-    
+
     return {
       ...reservation,
       credentials: decryptedCredentials,

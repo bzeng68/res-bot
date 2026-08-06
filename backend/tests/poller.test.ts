@@ -57,7 +57,7 @@ describe('poller', () => {
         bookReservation: sinon.stub().resolves({ confirmationCode: 'X', reservationDetails: {} }),
         resyClient: { getPaymentMethodId: sinon.stub().resolves(null) },
       },
-      '../src/database.js': { addBookingAttempt: sinon.stub() },
+      '../src/database.js': { addBookingAttempt: sinon.stub().resolves() },
       '../src/ws.js': { broadcastToFrontend: sinon.stub() },
     });
     findBestSlot = poller.findBestSlot;
@@ -190,7 +190,7 @@ describe('poller', () => {
           bookReservation: bookReservationStub,
           resyClient: { getPaymentMethodId: getPaymentMethodIdStub },
         },
-        '../src/database.js': { addBookingAttempt: sinon.stub() },
+        '../src/database.js': { addBookingAttempt: sinon.stub().resolves() },
         '../src/ws.js': { broadcastToFrontend: sinon.stub() },
       });
       bookWithRetry = pollerWithBookStub.bookWithRetry;

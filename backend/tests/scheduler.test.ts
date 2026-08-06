@@ -56,17 +56,23 @@ describe('scheduler', () => {
     clock = sinon.useFakeTimers({ now: NOW, toFake: ['setTimeout', 'Date'] });
 
     fakeGetActiveReservations = sinon.stub();
-    fakeUpdateReservationStatus = sinon.stub();
+    fakeUpdateReservationStatus = sinon.stub().resolves();
     fakeBookWithRetry = sinon.stub().resolves({ success: true, confirmationCode: 'CONF-123' });
 
     // Load the scheduler with all external dependencies mocked out so the
     // test process never connects to a database or starts a WebSocket server.
     // First arg is relative to this test file (tests/ → src/scheduler/index.ts).
-    // Mock keys are relative to the target module (src/scheduler/index.ts).
-    scheduler = await esmock('../src/scheduler/index.ts', {
+    // These are passed as esmock's third ("global") argument, not the second,
+    // because index.ts no longer imports database/ws/poller/resy-client
+    // directly — it delegates the actual fire logic to scheduler/pipeline.ts,
+    // which imports them instead. Global mocks apply anywhere in the import
+    // tree regardless of which file does the importing; the second-argument
+    // form only intercepts imports made directly by the target module itself.
+    scheduler = await esmock('../src/scheduler/index.ts', {}, {
       '../src/database.js': {
         getActiveReservations: fakeGetActiveReservations,
         getAllReservations: sinon.stub().returns([]),
+        getReservation: sinon.stub().resolves(null),
         updateReservationStatus: fakeUpdateReservationStatus,
         updateReservation: sinon.stub(),
       },
@@ -148,12 +154,12 @@ describe('scheduler', () => {
       // Window opened 10 hours ago → msUntilFire = 0 → setTimeout(fn, 0)
       fakeGetActiveReservations.returns([makeReservation()]);
 
-      scheduler.checkAndScheduleJobs();
+      await scheduler.checkAndScheduleJobs();
 
       assert.equal(clock.countTimers(), 2, 'should have two pending timers (prewarm + fallback)');
-      clock.tick(0);
-      // Allow the async fire() to call bookWithRetry
-      await Promise.resolve();
+      // tickAsync (rather than tick + a single microtask flush) because fire()
+      // now awaits multiple async database calls before reaching bookWithRetry.
+      await clock.tickAsync(0);
 
       assert.isTrue(fakeBookWithRetry.calledOnce, 'bookWithRetry should be called immediately');
       assert.isTrue(
@@ -170,20 +176,18 @@ describe('scheduler', () => {
         }),
       ]);
 
-      scheduler.checkAndScheduleJobs();
+      await scheduler.checkAndScheduleJobs();
 
       assert.equal(clock.countTimers(), 2, 'should have two pending timers (prewarm + fallback)');
-      clock.tick(4 * 60 * 1000);
-      await Promise.resolve();
+      await clock.tickAsync(4 * 60 * 1000);
       assert.isFalse(fakeBookWithRetry.called, 'should not book before the window opens');
 
       // 2 more minutes — window is now open, timer should fire
-      clock.tick(2 * 60 * 1000);
-      await Promise.resolve();
+      await clock.tickAsync(2 * 60 * 1000);
       assert.isTrue(fakeBookWithRetry.calledOnce, 'should book once the window opens');
     });
 
-    it('does not schedule a booking when the window is beyond the 10-minute horizon', () => {
+    it('does not schedule a booking when the window is beyond the 10-minute horizon', async () => {
       // releaseTime '11:00' UTC → fires in 1 hour, well beyond the 10-min scheduling horizon
       fakeGetActiveReservations.returns([
         makeReservation({
@@ -191,27 +195,27 @@ describe('scheduler', () => {
         }),
       ]);
 
-      scheduler.checkAndScheduleJobs();
+      await scheduler.checkAndScheduleJobs();
 
       assert.equal(clock.countTimers(), 0, 'should not schedule anything beyond the horizon');
     });
 
-    it('does not double-schedule a reservation that is already queued', () => {
+    it('does not double-schedule a reservation that is already queued', async () => {
       fakeGetActiveReservations.returns([makeReservation()]);
 
-      scheduler.checkAndScheduleJobs();
-      scheduler.checkAndScheduleJobs(); // second call should be a no-op
+      await scheduler.checkAndScheduleJobs();
+      await scheduler.checkAndScheduleJobs(); // second call should be a no-op
 
       assert.equal(clock.countTimers(), 2, 'should still have exactly two timers (prewarm + fallback)');
     });
 
-    it('skips reservations that are already booked or failed', () => {
+    it('skips reservations that are already booked or failed', async () => {
       fakeGetActiveReservations.returns([
         makeReservation({ status: 'booked' }),
         makeReservation({ id: 'res-2', status: 'failed' }),
       ]);
 
-      scheduler.checkAndScheduleJobs();
+      await scheduler.checkAndScheduleJobs();
 
       assert.equal(clock.countTimers(), 0, 'should not schedule completed reservations');
     });

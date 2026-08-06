@@ -5,12 +5,18 @@ import { initDatabase } from './database.js';
 import { initWebSocket } from './ws.js';
 import reservationRoutes from './routes/reservations.js';
 import restaurantRoutes from './routes/restaurants.js';
+import internalRoutes from './routes/internal.js';
 import { startScheduler } from './scheduler/index.js';
 
 dotenv.config();
 
 const app = express();
 const PORT = process.env.PORT || 3001;
+
+// Cloud Run terminates TLS at its own proxy and forwards plain HTTP, setting
+// X-Forwarded-Proto — without this, req.protocol always reports 'http', which
+// would break the callback URL the worker is given (see routes/reservations.ts).
+app.set('trust proxy', true);
 
 // Middleware
 app.use(cors());
@@ -19,6 +25,7 @@ app.use(express.json());
 // Routes
 app.use('/api/reservations', reservationRoutes);
 app.use('/api/restaurants', restaurantRoutes);
+app.use('/internal', internalRoutes);
 
 // Health check
 app.get('/health', (req, res) => {

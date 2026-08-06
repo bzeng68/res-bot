@@ -63,6 +63,13 @@ export async function bookWithRetry(reservation: ReservationRequest): Promise<Bo
   const failedSlotIds = new Set<string>();      // slots attempted this session
   let currentSlot: AvailableSlot | null = null; // visible to catch block
 
+  // Tracks whether the terminal state was "no slot in the requested range"
+  // (frontend offers an Edit Time Range flow for this) vs. some other error
+  // like repeated booking failures on a slot we DID find (editing the time
+  // range wouldn't help there — reset whenever a slot is actually found).
+  let lastNoSlotAvailableTimes: string | null = null;
+  let lastErrorMessage: string | null = null;
+
   for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
     console.log(`🎯 Booking attempt ${attempt}/${MAX_RETRIES} for ${reservation.restaurantName}...`);
 
@@ -80,7 +87,7 @@ export async function bookWithRetry(reservation: ReservationRequest): Promise<Bo
           ? Promise.resolve(prewarmHit)
           : getAvailability(reservation.restaurantId, reservation.targetDate, reservation.partySize);
 
-        const paymentFetch = resolvedPaymentId != null
+        const paymentFetch: Promise<number | null> = resolvedPaymentId != null
           ? Promise.resolve(resolvedPaymentId)
           : cachedPaymentId != null
             ? Promise.resolve(cachedPaymentId)
@@ -128,6 +135,7 @@ export async function bookWithRetry(reservation: ReservationRequest): Promise<Bo
 
       if (!currentSlot) {
         const available = [...new Set(slots.map(s => s.time))].sort().join(', ') || 'none';
+        lastNoSlotAvailableTimes = available;
         const msg = `Attempt ${attempt}: no slot in ${reservation.timeRange.start}–${reservation.timeRange.end}. Available: ${available}`;
         logAttempt(reservation.id, { action: 'error', slotDate: reservation.targetDate, message: msg });
         currentSlots = null; // force fresh fetch next attempt
@@ -137,6 +145,10 @@ export async function bookWithRetry(reservation: ReservationRequest): Promise<Bo
         }
         continue;
       }
+
+      // Found a candidate slot this attempt — any failure from here on isn't
+      // a "no slot in range" issue, so the final message shouldn't claim it is.
+      lastNoSlotAvailableTimes = null;
 
       // Mark as attempted before booking so the catch block can see it
       failedSlotIds.add(currentSlot.slotId);
@@ -190,6 +202,14 @@ export async function bookWithRetry(reservation: ReservationRequest): Promise<Bo
         : `Attempt ${attempt}: ${err.message || 'unknown error'}`;
 
       console.error(`❌ ${msg}`);
+      // Body is frequently empty on a bare error status (as seen repeatedly
+      // with these 500s) — headers are the only place a WAF/anti-bot/
+      // rate-limit layer would leave a fingerprint (Retry-After, Incapsula's
+      // x-iinfo, CDN ray/POP ids, etc.), so capture those too.
+      if (err.response?.headers) {
+        console.error(`❌ Attempt ${attempt} response headers:`, JSON.stringify(err.response.headers));
+      }
+      lastErrorMessage = httpStatus ? `HTTP ${httpStatus}` : (err.message || 'unknown error');
       logAttempt(reservation.id, {
         action: 'error',
         message: `Booking failed: ${msg}`,
@@ -252,7 +272,9 @@ export async function bookWithRetry(reservation: ReservationRequest): Promise<Bo
     }
   }
 
-  const finalError = `Failed after ${MAX_RETRIES} attempts. No matching slot for ${reservation.timeRange.start}–${reservation.timeRange.end} on ${reservation.targetDate}.`;
+  const finalError = lastNoSlotAvailableTimes != null
+    ? `No slots match your requested time range (${reservation.timeRange.start}–${reservation.timeRange.end}) on ${reservation.targetDate}. Available times: ${lastNoSlotAvailableTimes}.`
+    : `Failed after ${MAX_RETRIES} attempts to book ${reservation.targetDate}. Last error: ${lastErrorMessage ?? 'unknown error'}.`;
   broadcastToFrontend({
     type: 'BOOKING_UPDATE',
     data: { reservationId: reservation.id, status: 'failed', error: finalError },
@@ -279,7 +301,7 @@ function logAttempt(
     action: opts.action,
     message: opts.message,
     details: opts.details,
-  });
+  }).catch(err => console.error('Failed to log booking attempt:', err));
 }
 
 export function findBestSlot(

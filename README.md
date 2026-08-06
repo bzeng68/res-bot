@@ -26,11 +26,20 @@ npm install
 
 ### 2. Configure Backend
 
-Create `backend/.env`:
+Reservations are stored in Firestore. For local dev, run the emulator instead
+of pointing at real GCP:
+
+```bash
+gcloud emulators firestore start --host-port=localhost:8081
+export FIRESTORE_EMULATOR_HOST=localhost:8081
+```
+
+Create `backend/.env` (see `backend/.env.example` for the full list, including
+optional Cloud Tasks vars used in production — see [Deploying](#deploying)):
 
 ```env
 PORT=3001
-DATA_DIR=./data
+GCP_PROJECT_ID=any-placeholder-when-using-the-emulator
 ENCRYPTION_KEY=<generate with: node -e "console.log(require('crypto').randomBytes(32).toString('hex'))">
 ```
 
@@ -79,16 +88,22 @@ res-bot/
 ├── frontend/         # React + TypeScript + Tailwind CSS (Vite)
 ├── backend/
 │   └── src/
-│       ├── index.ts              # Entry point, HTTP + WebSocket server
+│       ├── index.ts              # Control plane entry point: HTTP + WebSocket server
+│       ├── worker.ts             # Worker entry point: fires one reservation, then exits
 │       ├── ws.ts                 # WebSocket state and broadcast helpers
-│       ├── database.ts           # JSON file storage (AES-256 encrypted)
+│       ├── database.ts           # Firestore-backed storage (AES-256 encrypted credentials)
 │       ├── scheduler/
-│       │   ├── index.ts          # Job scheduler (cron + setTimeout)
-│       │   └── poller.ts         # bookWithRetry — 5 attempts, 3s apart
-│       ├── routes/               # REST API routes
+│       │   ├── index.ts          # In-process cron scheduler (local dev fallback)
+│       │   ├── pipeline.ts       # Shared prewarm/fallback/fire logic — used by both
+│       │   │                     # the in-process scheduler and the worker
+│       │   └── poller.ts         # bookWithRetry — 5 attempts, 500ms apart
+│       ├── routes/               # REST API routes (+ internal.ts: worker status callback)
+│       ├── utils/
+│       │   └── tasksQueue.ts     # Cloud Tasks enqueue/cancel (production deploys)
 │       └── api/
 │           └── resy-client.ts    # Resy API wrapper
 ├── shared/           # Shared TypeScript types
+├── infra/            # Terraform + Dockerfiles for the GCP deployment — see infra/README.md
 └── .github/
     └── workflows/
         └── test.yml  # CI — runs on every push / pull request
@@ -97,8 +112,18 @@ res-bot/
 **Tech Stack:**
 - Frontend: React + TypeScript + Tailwind CSS + Vite
 - Backend: Node.js + Express + `ws` + `node-cron`
-- Storage: JSON file with AES-256 encryption
+- Storage: Firestore, with AES-256 encrypted credentials
 - API: Resy public API (reverse-engineered)
+
+## Deploying
+
+Locally, `npm run dev` runs everything in one process with an in-process
+cron scheduler. In production (see `infra/`), the control plane and a
+separate ephemeral worker service run on Cloud Run: the control plane
+enqueues a Cloud Task ~15 minutes before each reservation's booking window
+opens, and the worker wakes up, fires the booking, and exits — so nothing
+sits idle (and billing) between reservations. See `infra/README.md` for
+setup and `infra/docker/` for the two services' Dockerfiles.
 
 ## Testing
 

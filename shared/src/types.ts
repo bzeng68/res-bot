@@ -32,6 +32,7 @@ export interface ReservationRequest {
   bookingAttempts?: BookingAttempt[]; // Log of all booking attempts
   bookingWindow?: BookingWindow; // When reservations open
   tokenStatus?: 'valid' | 'invalid' | 'unknown'; // Proactively checked daily
+  cloudTaskName?: string; // Set when scheduled via Cloud Tasks instead of the in-process scheduler
 }
 
 export interface TimeRange {

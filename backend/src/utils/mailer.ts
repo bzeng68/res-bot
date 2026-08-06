@@ -1,7 +1,8 @@
 /**
  * Email notifications for booking results.
  *
- * Configure via environment variables:
+ * Configure via individual environment variables (local dev — see
+ * backend/.env.example):
  *   SMTP_HOST     – e.g. smtp.gmail.com
  *   SMTP_PORT     – e.g. 465 (SSL) or 587 (TLS/STARTTLS)
  *   SMTP_SECURE   – "true" for SSL (port 465), "false" for STARTTLS (port 587)
@@ -10,7 +11,13 @@
  *   SMTP_FROM     – From address, e.g. "Res Bot <you@gmail.com>"
  *   SMTP_TO       – Comma-separated recipient list, e.g. "a@x.com,b@y.com"
  *
- * If any required variable is missing the module logs a warning and skips
+ * ...or a single SMTP_CREDENTIALS JSON blob with the same fields (production —
+ * this is what infra/ wires as a single Secret Manager secret rather than
+ * six separate ones): {"host":"...","port":465,"secure":true,"user":"...",
+ * "pass":"...","from":"...","to":"a@x.com,b@y.com"}. SMTP_CREDENTIALS takes
+ * precedence when both are present.
+ *
+ * If any required field is missing the module logs a warning and skips
  * sending silently so it never causes a booking failure.
  */
 
@@ -18,20 +25,45 @@ import nodemailer from 'nodemailer';
 import type { BookingAttempt } from '../../../shared/src/types.js';
 
 function getConfig() {
-  const host = process.env.SMTP_HOST;
-  const port = parseInt(process.env.SMTP_PORT ?? '587', 10);
-  const secure = (process.env.SMTP_SECURE ?? 'false').toLowerCase() === 'true';
-  const user = process.env.SMTP_USER;
-  const pass = process.env.SMTP_PASS;
-  const from = process.env.SMTP_FROM ?? user;
-  const toRaw = process.env.SMTP_TO;
+  const raw = readRawConfig();
+  if (!raw) return null;
 
+  const { host, user, pass, toRaw } = raw;
   if (!host || !user || !pass || !toRaw) return null;
 
-  const to = toRaw.split(',').map(s => s.trim()).filter(Boolean);
+  const to = toRaw.split(',').map((s: string) => s.trim()).filter(Boolean);
   if (to.length === 0) return null;
 
-  return { host, port, secure, user, pass, from, to };
+  return { host, port: raw.port, secure: raw.secure, user, pass, from: raw.from ?? user, to };
+}
+
+function readRawConfig() {
+  if (process.env.SMTP_CREDENTIALS) {
+    try {
+      const parsed = JSON.parse(process.env.SMTP_CREDENTIALS);
+      return {
+        host: parsed.host as string | undefined,
+        port: parseInt(String(parsed.port ?? '587'), 10),
+        secure: Boolean(parsed.secure),
+        user: parsed.user as string | undefined,
+        pass: parsed.pass as string | undefined,
+        from: parsed.from as string | undefined,
+        toRaw: Array.isArray(parsed.to) ? parsed.to.join(',') : (parsed.to as string | undefined),
+      };
+    } catch (err) {
+      console.error('📧 Failed to parse SMTP_CREDENTIALS as JSON — falling back to individual SMTP_* vars:', err);
+    }
+  }
+
+  return {
+    host: process.env.SMTP_HOST,
+    port: parseInt(process.env.SMTP_PORT ?? '587', 10),
+    secure: (process.env.SMTP_SECURE ?? 'false').toLowerCase() === 'true',
+    user: process.env.SMTP_USER,
+    pass: process.env.SMTP_PASS,
+    from: process.env.SMTP_FROM,
+    toRaw: process.env.SMTP_TO,
+  };
 }
 
 function makeTransport(cfg: NonNullable<ReturnType<typeof getConfig>>) {

@@ -1,0 +1,7 @@
+project_id = "your-gcp-project-id"
+region     = "us-central1"
+
+# Leave these unset until images are pushed to the Artifact Registry repo
+# this stack creates — Cloud Run will boot a placeholder image instead.
+# control_plane_image = "us-central1-docker.pkg.dev/your-gcp-project-id/res-bot/control-plane:latest"
+# worker_image         = "us-central1-docker.pkg.dev/your-gcp-project-id/res-bot/worker:latest"

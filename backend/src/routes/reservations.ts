@@ -15,6 +15,7 @@ import {
 import { stopJobForReservation } from '../scheduler/index.js';
 import { resyClient } from '../api/resy-client.js';
 import { wss } from '../ws.js';
+import { isCloudTasksEnabled, enqueueBookingTask, cancelBookingTask } from '../utils/tasksQueue.js';
 import type { ReservationRequest, ApiResponse } from '../../../shared/src/types.js';
 
 dayjs.extend(utc);
@@ -23,9 +24,9 @@ dayjs.extend(timezone);
 const router = Router();
 
 // Get all reservations
-router.get('/', (req, res) => {
+router.get('/', async (req, res) => {
   try {
-    const reservations = getAllReservations();
+    const reservations = await getAllReservations();
     res.json({ success: true, data: reservations } as ApiResponse<ReservationRequest[]>);
   } catch (error) {
     console.error('Error fetching reservations:', error);
@@ -37,9 +38,9 @@ router.get('/', (req, res) => {
 });
 
 // Get active reservations
-router.get('/active', (req, res) => {
+router.get('/active', async (req, res) => {
   try {
-    const reservations = getActiveReservations();
+    const reservations = await getActiveReservations();
     res.json({ success: true, data: reservations } as ApiResponse<ReservationRequest[]>);
   } catch (error) {
     console.error('Error fetching active reservations:', error);
@@ -51,9 +52,9 @@ router.get('/active', (req, res) => {
 });
 
 // Get single reservation
-router.get('/:id', (req, res) => {
+router.get('/:id', async (req, res) => {
   try {
-    const reservation = getReservation(req.params.id);
+    const reservation = await getReservation(req.params.id);
     if (!reservation) {
       res.status(404).json({ 
         success: false, 
@@ -124,11 +125,30 @@ router.post('/', async (req, res) => {
       scheduledPollTime,
     };
     
-    createReservation(reservation);
-    
-    res.status(201).json({ 
-      success: true, 
-      data: reservation 
+    await createReservation(reservation);
+
+    if (isCloudTasksEnabled()) {
+      try {
+        const callbackUrl = `${req.protocol}://${req.get('host')}/internal/reservation-status`;
+        const taskName = await enqueueBookingTask(reservation, callbackUrl);
+        await updateReservation(reservation.id, { cloudTaskName: taskName });
+        reservation.cloudTaskName = taskName;
+      } catch (error) {
+        console.error('Failed to enqueue booking task:', error);
+        // Don't leave a reservation that nothing will ever fire — the local
+        // in-process scheduler is disabled whenever Cloud Tasks mode is on.
+        await deleteReservation(reservation.id);
+        res.status(500).json({
+          success: false,
+          error: 'Failed to schedule booking task'
+        } as ApiResponse<never>);
+        return;
+      }
+    }
+
+    res.status(201).json({
+      success: true,
+      data: reservation
     } as ApiResponse<ReservationRequest>);
 
     // Fire-and-forget: cache the payment method ID so booking day skips the /2/user fetch.
@@ -136,9 +156,9 @@ router.post('/', async (req, res) => {
     const authToken = reservation.credentials?.authToken;
     if (authToken) {
       resyClient.getPaymentMethodId(authToken)
-        .then(id => {
+        .then(async id => {
           if (id != null) {
-            updateReservation(reservation.id, {
+            await updateReservation(reservation.id, {
               credentials: { ...reservation.credentials, paymentMethodId: id },
             });
             console.log(`💳 Cached payment method ID ${id} for ${reservation.restaurantName}`);
@@ -156,9 +176,9 @@ router.post('/', async (req, res) => {
 });
 
 // Update reservation (for retrying with different time range)
-router.patch('/:id', (req, res) => {
+router.patch('/:id', async (req, res) => {
   try {
-    const reservation = getReservation(req.params.id);
+    const reservation = await getReservation(req.params.id);
     if (!reservation) {
       res.status(404).json({ 
         success: false, 
@@ -168,23 +188,45 @@ router.patch('/:id', (req, res) => {
     }
     
     const updates = req.body;
-    
+
     // If updating time range, reset status to scheduled
     if (updates.timeRange) {
+      // Only a reservation coming FROM a terminal state has no live task
+      // covering it — one still 'scheduled'/'polling' already has a pending
+      // Cloud Task (or in-process timer) that a timeRange-only edit doesn't
+      // invalidate, since it doesn't change the fire time. Enqueuing another
+      // one in that case would risk firing the same reservation twice.
+      const wasTerminal = reservation.status === 'failed' || reservation.status === 'booked' || reservation.status === 'cancelled';
+
       updates.status = 'scheduled';
       updates.result = undefined;
-      
+
       // Recalculate scheduled poll time if needed
       const targetDate = dayjs(reservation.targetDate);
       const now = dayjs();
       const hoursUntilReservation = targetDate.diff(now, 'hours');
-      
+
       if (hoursUntilReservation <= 12) {
         updates.scheduledPollTime = now.toISOString();
       }
+
+      if (isCloudTasksEnabled() && wasTerminal) {
+        try {
+          const callbackUrl = `${req.protocol}://${req.get('host')}/internal/reservation-status`;
+          const taskName = await enqueueBookingTask({ ...reservation, ...updates }, callbackUrl);
+          updates.cloudTaskName = taskName;
+        } catch (error) {
+          console.error('Failed to enqueue retry booking task:', error);
+          res.status(500).json({
+            success: false,
+            error: 'Failed to schedule retry'
+          } as ApiResponse<never>);
+          return;
+        }
+      }
     }
-    
-    const updatedReservation = updateReservation(req.params.id, updates);
+
+    const updatedReservation = await updateReservation(req.params.id, updates);
     
     res.json({ 
       success: true, 
@@ -200,23 +242,31 @@ router.patch('/:id', (req, res) => {
 });
 
 // Cancel/delete reservation
-router.delete('/:id', (req, res) => {
+router.delete('/:id', async (req, res) => {
   try {
-    const reservation = getReservation(req.params.id);
+    const reservation = await getReservation(req.params.id);
     if (!reservation) {
-      res.status(404).json({ 
-        success: false, 
-        error: 'Reservation not found' 
+      res.status(404).json({
+        success: false,
+        error: 'Reservation not found'
       } as ApiResponse<never>);
       return;
     }
-    
-    // Stop any active polling job for this reservation
+
+    // Stop any active polling job for this reservation (in-process scheduler mode)
     stopJobForReservation(req.params.id);
+
+    // Cancel its Cloud Task if one was scheduled (Cloud Tasks mode)
+    if (reservation.cloudTaskName) {
+      await cancelBookingTask(reservation.cloudTaskName).catch(err =>
+        console.error(`Failed to cancel Cloud Task for ${req.params.id}:`, err)
+      );
+    }
+
     console.log(`🗑️ Stopped polling job and deleted reservation for ${reservation.restaurantName}`);
-    
+
     // Delete the reservation from database
-    deleteReservation(req.params.id);
+    await deleteReservation(req.params.id);
     
     // Broadcast to connected clients that reservation was deleted
     // This ensures the frontend UI updates immediately

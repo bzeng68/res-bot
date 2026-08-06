@@ -1,7 +1,8 @@
 import axios, { AxiosInstance } from 'axios';
-import type { 
-  Restaurant, 
-  SearchResult, 
+import https from 'https';
+import type {
+  Restaurant,
+  SearchResult,
   AvailableSlot,
 } from '../../../shared/src/types.js';
 
@@ -9,12 +10,19 @@ import type {
 const RESY_BASE_URL = 'https://api.resy.com';
 const RESY_API_KEY = 'VbWk7s3L4KiK5fzlO7JD3Q5EYolJI7n5'; // Public API key from Resy web app
 
+// Reuse one TLS connection across prewarm's /4/find + /3/details + the final
+// /3/book instead of paying a fresh handshake per call — those three calls
+// land within ~200ms of each other on the critical path, so the saved
+// handshake (~100-300ms) is pure win with no behavioral downside.
+const keepAliveAgent = new https.Agent({ keepAlive: true, maxSockets: 10 });
+
 class ResyClient {
   private client: AxiosInstance;
 
   constructor() {
     this.client = axios.create({
       baseURL: RESY_BASE_URL,
+      httpsAgent: keepAliveAgent,
       headers: {
         'Authorization': `ResyAPI api_key="${RESY_API_KEY}"`,
         'Content-Type': 'application/json',
@@ -90,7 +98,7 @@ class ResyClient {
 
       const slots = response.data.results?.venues?.[0]?.slots || [];
       
-      return slots.map(slot => {
+      return slots.map((slot: any) => {
         const startTime = new Date(slot.date.start);
         const timeString = startTime.toTimeString().slice(0, 5); // "HH:MM"
         
@@ -106,7 +114,14 @@ class ResyClient {
       if (error.response?.status === 404) {
         return []; // No availability
       }
+      // Body is often empty on a bare 500 — headers are the only place a
+      // WAF/rate-limit/anti-bot layer (Incapsula-style) would leave a
+      // fingerprint (e.g. Retry-After, x-iinfo, CDN POP/ray IDs), so log
+      // those too instead of just the (possibly empty) body.
       console.error('Availability check failed:', error.response?.data || error.message);
+      if (error.response) {
+        console.error('Availability check response headers:', JSON.stringify(error.response.headers));
+      }
       throw new Error('Failed to check availability');
     }
   }
@@ -124,7 +139,7 @@ class ResyClient {
     };
 
     try {
-      const res = await axios.get(`${RESY_BASE_URL}/2/user`, { headers: baseHeaders });
+      const res = await this.client.get('/2/user', { headers: baseHeaders });
       const paymentMethods = res.data?.payment_methods;
       if (paymentMethods && paymentMethods.length > 0) {
         const id = paymentMethods[0]?.id;
@@ -137,7 +152,7 @@ class ResyClient {
 
     // Fallback: try /3/user
     try {
-      const res = await axios.get(`${RESY_BASE_URL}/3/user`, { headers: baseHeaders });
+      const res = await this.client.get('/3/user', { headers: baseHeaders });
       const pm = res.data?.payment_method_id || res.data?.payment_methods?.[0]?.id;
       if (pm) {
         console.log(`💳 Found payment method ID (fallback): ${pm}`);
@@ -174,10 +189,21 @@ class ResyClient {
     const day = dateMatch ? dateMatch[1] : '';
     if (!day) throw new Error(`Could not extract date from slot token: ${slotToken}`);
 
-    const detailsUrl = `${RESY_BASE_URL}/3/details?day=${encodeURIComponent(day)}&party_size=${partySize}&x-resy-auth-token=${encodeURIComponent(authToken)}&venue_id=${encodeURIComponent(venueId)}&config_id=${encodeURIComponent(slotToken)}`;
     console.log(`📋 GET /3/details for venue ${venueId} on ${day} party ${partySize}...`);
 
-    const detailsRes = await axios.get(detailsUrl, { headers: commonHeaders });
+    // Use this.client (not a bare axios.get) so this shares the keep-alive
+    // connection with /4/find and /3/book — all three land within ~200ms of
+    // each other on the critical path.
+    const detailsRes = await this.client.get('/3/details', {
+      params: {
+        day,
+        party_size: partySize,
+        'x-resy-auth-token': authToken,
+        venue_id: venueId,
+        config_id: slotToken,
+      },
+      headers: commonHeaders,
+    });
     const bookToken = detailsRes.data?.book_token?.value;
 
     if (!bookToken) {
@@ -253,8 +279,8 @@ class ResyClient {
     }
 
     console.log(`📝 POST /3/book (payment method: ${paymentMethodId ?? 'none'})...`);
-    const bookRes = await axios.post(
-      `${RESY_BASE_URL}/3/book`,
+    const bookRes = await this.client.post(
+      '/3/book',
       new URLSearchParams(bookPayload).toString(),
       { headers: bookHeaders },
     );

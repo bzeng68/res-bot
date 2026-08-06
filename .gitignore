@@ -8,3 +8,13 @@ logs/
 *.log
 .DS_Store
 coverage/
+
+# Terraform
+infra/.terraform/
+infra/*.tfstate
+infra/*.tfstate.*
+infra/terraform.tfvars
+infra/*.tfplan
+
+# Claude
+.claude/settings.local.json
