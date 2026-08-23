@@ -326,25 +326,18 @@ export function findBestSlot(
   const other = valid.filter(s => !s.tableType?.toLowerCase().includes('dining room'));
 
   // Priority:
-  // 1. Dining Room + preferred time (in preference order)
-  // 2. Dining Room + any time
-  // 3. Other tables + preferred time (in preference order)
-  // 4. Other tables + first valid
+  // 1. Preferred times in user-selected order (regardless of dining-room/table type)
+  // 2. If none preferred are available, fall back to the first valid dining-room slot
+  // 3. Then the first valid non-dining-room slot
 
   if (preferredTimes?.length) {
     for (const t of preferredTimes) {
-      const match = diningRoom.find(s => s.time === t);
+      const match = valid.find(s => s.time === t);
       if (match) return match;
     }
   }
+
   if (diningRoom.length > 0) return diningRoom[0];
-
-  if (preferredTimes?.length) {
-    for (const t of preferredTimes) {
-      const match = other.find(s => s.time === t);
-      if (match) return match;
-    }
-  }
   return other[0] ?? null;
 }
 

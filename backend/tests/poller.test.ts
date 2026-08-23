@@ -88,11 +88,12 @@ describe('poller', () => {
       assert.equal(result?.time, '19:00');
     });
 
-    it('respects preferred time priority order — picks the first match', () => {
+    it('respects preferred time priority order exactly — first selected preferred time wins', () => {
       const slots = [makeSlot('18:00'), makeSlot('19:00'), makeSlot('20:00')];
-      // Both '20:00' and '19:00' are available; '20:00' is listed first in preferences
+      // The array order is the priority. Even though 19:00 is earlier in the clock,
+      // we must choose 20:00 because it was selected first by the user.
       const result = findBestSlot(slots, '18:00', '21:00', ['20:00', '19:00']);
-      assert.equal(result?.time, '20:00', 'should pick the highest-priority preferred time');
+      assert.equal(result?.time, '20:00', 'should pick the first preferred time in the user-selected priority order');
     });
 
     it('falls back to first valid slot when none of the preferred times are available', () => {
@@ -130,13 +131,14 @@ describe('poller', () => {
       assert.isNull(findBestSlot(slots, '18:00', '21:00', undefined, exclude));
     });
 
-    it('prefers Dining Room over a preferred time at a non-dining-room table', () => {
+    it('respects the exact preferred-time priority order before any table-type fallback', () => {
       const slots = [
-        makeSlot('18:00', 'slot-A', 'Bar'),       // preferred time, but Bar
-        makeSlot('19:00', 'slot-B', 'Dining Room'), // not preferred, but Dining Room
+        makeSlot('18:00', 'slot-A', 'Dining Room'),
+        makeSlot('19:30', 'slot-B', 'Bar'),
+        makeSlot('20:00', 'slot-C', 'Dining Room'),
       ];
-      const result = findBestSlot(slots, '18:00', '21:00', ['18:00']);
-      assert.equal(result?.slotId, 'slot-B', 'Dining Room at 19:00 should beat Bar at preferred 18:00');
+      const result = findBestSlot(slots, '18:00', '21:00', ['19:30', '18:00']);
+      assert.equal(result?.slotId, 'slot-B', 'the first preferred time in the array should win even if it is on a non-dining-room table');
     });
 
     it('picks preferred time within Dining Room when available', () => {
