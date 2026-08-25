@@ -31,7 +31,7 @@
   const RECENT_KEY = 'otr_recentlyFinished';
 
   function log(...args) {
-    console.log('[OpenTableRunner]', ...args);
+    console.log(`[OpenTableRunner] ${new Date().toISOString()}`, ...args);
   }
 
   function sleep(ms) {
@@ -164,16 +164,22 @@
     el.click();
   }
 
-  // candidates: [{ selector, text?, exact? }] - first visible match wins
+  // candidates: [{ selector, text?, exact? }] - first visible match wins.
+  // Returns the matched candidate (not just true/false) so callers can log
+  // exactly what was selected, not just that something was.
   function clickFirstVisible(candidates) {
     for (const c of candidates) {
       const el = findVisible(c.selector, c.text, c.exact);
       if (el) {
         simulateClick(el);
-        return true;
+        return c;
       }
     }
-    return false;
+    return null;
+  }
+
+  function describeCandidate(c) {
+    return c.text != null ? `${c.selector} text~="${c.text}"` : c.selector;
   }
 
   function dismissCommonPrompts() {
@@ -257,10 +263,12 @@
   // One tick of the loop: check URL/page state, click whatever's relevant,
   // return true when the job has reached a terminal state.
   async function tick(job) {
+    log('action=tick path=', location.pathname, 'selectedTime=', job.selectedTime || '(none yet)');
     dismissCommonPrompts();
 
     if (isConfirmationPage()) {
       const code = extractConfirmationCode(document.body.innerText.toLowerCase());
+      log('action=confirmed choice=', code || '(no confirmation code found)');
       await finishJob(job, 'booking_success', { selectedTime: job.selectedTime, confirmationCode: code, finalUrl: location.href });
       return true;
     }
@@ -268,6 +276,7 @@
     if (!job.selectedTime) {
       const preferredTimes = job.timeRange.preferredTimes?.length ? job.timeRange.preferredTimes : [job.timeRange.start];
       const availableTimes = scanAvailableTimes();
+      log('action=scan-times choice=', availableTimes.length ? availableTimes.join(', ') : '(none found yet)');
       if (availableTimes.length && !job.reportedSlots) {
         job.reportedSlots = true;
         gmSet(ACTIVE_JOB_KEY, job);
@@ -276,7 +285,9 @@
 
       for (const time of preferredTimes) {
         for (const label of buildTimeLabels(time)) {
-          if (clickFirstVisible([{ selector: 'button', text: label }, { selector: 'a', text: label }])) {
+          const matched = clickFirstVisible([{ selector: 'button', text: label }, { selector: 'a', text: label }]);
+          if (matched) {
+            log('action=select-time choice=', time, `(matched label "${label}")`);
             job.selectedTime = time;
             gmSet(ACTIVE_JOB_KEY, job);
             await reportStatus(job.id, 'slot_selected', { selectedTime: time, url: location.href });
@@ -284,10 +295,12 @@
           }
         }
       }
+      log('action=select-time choice=(no preferred time matched this tick)');
       return false;
     }
 
-    clickFirstVisible(selectorsForCurrentStage());
+    const stageMatch = clickFirstVisible(selectorsForCurrentStage());
+    log('action=stage-click choice=', stageMatch ? describeCandidate(stageMatch) : '(nothing matched this tick)');
     return false;
   }
 
@@ -316,7 +329,7 @@
       }
 
       const url = buildOpenTableUrl(job);
-      log('picking up job', job.id, url);
+      log('action=pickup-job choice=', job.id, url);
       await reportStatus(job.id, 'runner_started', { url, partySize: job.partySize });
 
       gmSet(ACTIVE_JOB_KEY, {
