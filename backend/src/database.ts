@@ -21,13 +21,17 @@ function col() {
 
 // Reservation operations
 export async function createReservation(reservation: ReservationRequest): Promise<void> {
-  const encrypted = {
-    ...reservation,
-    credentials: {
-      ...reservation.credentials,
-      authToken: encryptPassword(reservation.credentials.authToken),
-    },
-  };
+  // OpenTable jobs have no Resy-style credentials (auth comes from the local
+  // runner's signed-in Chrome profile instead), so there's nothing to encrypt.
+  const encrypted = reservation.credentials?.authToken
+    ? {
+        ...reservation,
+        credentials: {
+          ...reservation.credentials,
+          authToken: encryptPassword(reservation.credentials.authToken),
+        },
+      }
+    : reservation;
 
   // Optional fields (e.g. bookingWindow) may be explicitly `undefined` on the
   // object literal rather than omitted — Firestore rejects literal undefined
@@ -162,6 +166,9 @@ function deepStripUndefined<T>(value: T): T {
 
 // Helper function to decrypt credentials when reading
 function decryptReservationCredentials(reservation: ReservationRequest): ReservationRequest {
+  // OpenTable jobs have no Resy-style credentials — nothing to decrypt.
+  if (!reservation.credentials?.authToken) return reservation;
+
   try {
     const decryptedCredentials: ReservationRequest['credentials'] = {
       platform: 'resy',

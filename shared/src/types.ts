@@ -1,5 +1,7 @@
 // Shared TypeScript types for res-bot
 
+export type ReservationPlatform = 'resy' | 'opentable';
+
 export interface Restaurant {
   id: string;
   name: string;
@@ -7,13 +9,26 @@ export interface Restaurant {
   address?: string;
   cuisine?: string;
   bookingWindow: BookingWindow;
-  platform: 'resy';
+  platform: ReservationPlatform;
 }
 
 export interface BookingWindow {
   daysInAdvance: number;
   releaseTime: string; // "10:00" in restaurant's timezone
   timezone: string; // "America/New_York"
+}
+
+export interface OpenTableJob {
+  restaurantId?: string;
+  restaurantSlug?: string;
+  restaurantName: string;
+  targetDate: string;
+  timeRange: TimeRange;
+  partySize: number;
+  pollIntervalMs?: number;
+  runUntil?: string;
+  userEmail?: string;
+  platform: 'opentable';
 }
 
 export interface ReservationRequest {
@@ -33,6 +48,10 @@ export interface ReservationRequest {
   bookingWindow?: BookingWindow; // When reservations open
   tokenStatus?: 'valid' | 'invalid' | 'unknown'; // Proactively checked daily
   cloudTaskName?: string; // Set when scheduled via Cloud Tasks instead of the in-process scheduler
+  platform?: ReservationPlatform;
+  restaurantSlug?: string;
+  pollIntervalMs?: number;
+  runUntil?: string;
 }
 
 export interface TimeRange {

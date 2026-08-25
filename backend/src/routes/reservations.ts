@@ -114,12 +114,16 @@ router.post('/', async (req, res) => {
       id: uuidv4(),
       restaurantId: reservationData.restaurantId,
       restaurantName: reservationData.restaurantName,
+      platform: reservationData.platform ?? 'resy',
+      restaurantSlug: reservationData.restaurantSlug,
       targetDate: reservationData.targetDate,
       timeRange: reservationData.timeRange,
       partySize: reservationData.partySize,
       userEmail: reservationData.userEmail,
       credentials: reservationData.credentials,
       bookingWindow: reservationData.bookingWindow,
+      pollIntervalMs: reservationData.pollIntervalMs,
+      runUntil: reservationData.runUntil,
       status: 'scheduled',
       createdAt: new Date().toISOString(),
       scheduledPollTime,
@@ -127,7 +131,7 @@ router.post('/', async (req, res) => {
     
     await createReservation(reservation);
 
-    if (isCloudTasksEnabled()) {
+    if (reservation.platform !== 'opentable' && isCloudTasksEnabled()) {
       try {
         const callbackUrl = `${req.protocol}://${req.get('host')}/internal/reservation-status`;
         const taskName = await enqueueBookingTask(reservation, callbackUrl);
@@ -154,7 +158,7 @@ router.post('/', async (req, res) => {
     // Fire-and-forget: cache the payment method ID so booking day skips the /2/user fetch.
     // This runs after the response is sent so it doesn't add latency to reservation creation.
     const authToken = reservation.credentials?.authToken;
-    if (authToken) {
+    if (reservation.platform !== 'opentable' && authToken) {
       resyClient.getPaymentMethodId(authToken)
         .then(async id => {
           if (id != null) {

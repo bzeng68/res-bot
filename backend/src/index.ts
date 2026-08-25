@@ -7,6 +7,7 @@ import reservationRoutes from './routes/reservations.js';
 import restaurantRoutes from './routes/restaurants.js';
 import internalRoutes from './routes/internal.js';
 import { startScheduler } from './scheduler/index.js';
+import { getAllReservations } from './database.js';
 
 dotenv.config();
 
@@ -26,6 +27,24 @@ app.use(express.json());
 app.use('/api/reservations', reservationRoutes);
 app.use('/api/restaurants', restaurantRoutes);
 app.use('/internal', internalRoutes);
+
+// Polled by the OpenTable browser runner (Tampermonkey userscript, see tampermonkey/).
+app.get('/api/opentable/jobs', async (req, res) => {
+  try {
+    const expected = process.env.OPENTABLE_RUNNER_TOKEN;
+    if (expected && req.get('x-opentable-runner-token') !== expected) {
+      res.status(403).json({ success: false, error: 'forbidden' });
+      return;
+    }
+
+    const reservations = await getAllReservations();
+    const jobs = reservations.filter(r => r.platform === 'opentable' && (r.status === 'scheduled' || r.status === 'polling'));
+    res.json({ success: true, data: jobs });
+  } catch (error) {
+    console.error('Error fetching OpenTable jobs:', error);
+    res.status(500).json({ success: false, error: 'Failed to fetch OpenTable jobs' });
+  }
+});
 
 // Health check
 app.get('/health', (req, res) => {

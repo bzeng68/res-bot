@@ -11,6 +11,7 @@
     "dev": "concurrently \"npm run dev:backend\" \"npm run dev:frontend\"",
     "dev:backend": "npm run dev --workspace=backend",
     "dev:frontend": "npm run dev --workspace=frontend",
+    "start": "concurrently -n backend,frontend --restart-tries 5 --restart-after 3000 \"npm run dev:backend\" \"npm run dev:frontend\"",
     "build": "npm run build --workspaces",
     "install:all": "npm install"
   },
