@@ -4,6 +4,7 @@ import type { TimeRange } from '../../../shared/src/types';
 interface Props {
   value: TimeRange;
   onChange: (timeRange: TimeRange) => void;
+  accent?: 'primary' | 'red';
 }
 
 const TIME_OPTIONS = [
@@ -24,8 +25,12 @@ const TIME_OPTIONS = [
   '00:00',
 ];
 
-export default function TimeSelector({ value, onChange }: Props) {
+export default function TimeSelector({ value, onChange, accent = 'primary' }: Props) {
   const [showPreferred, setShowPreferred] = useState(true);
+
+  const toggleText = accent === 'red' ? 'text-red-700 hover:text-red-800' : 'text-primary-600 hover:text-primary-700';
+  const selectedChip = accent === 'red' ? 'bg-red-700 text-white border-red-700' : 'bg-primary-600 text-white border-primary-600';
+  const unselectedChipHover = accent === 'red' ? 'hover:border-red-500' : 'hover:border-primary-500';
 
   const handleStartChange = (start: string) => {
     onChange({ ...value, start });
@@ -78,7 +83,7 @@ export default function TimeSelector({ value, onChange }: Props) {
       <div>
         <button
           onClick={() => setShowPreferred(!showPreferred)}
-          className="text-sm text-primary-600 hover:text-primary-700"
+          className={`text-sm ${toggleText}`}
         >
           {showPreferred ? '− Hide' : '+ Set'} preferred times (optional)
         </button>
@@ -98,8 +103,8 @@ export default function TimeSelector({ value, onChange }: Props) {
                   onClick={() => togglePreferredTime(time)}
                   className={`px-3 py-2 text-sm rounded-lg border transition-colors ${
                     value.preferredTimes?.includes(time)
-                      ? 'bg-primary-600 text-white border-primary-600'
-                      : 'bg-white text-gray-700 border-gray-300 hover:border-primary-500'
+                      ? selectedChip
+                      : `bg-white text-gray-700 border-gray-300 ${unselectedChipHover}`
                   }`}
                 >
                   {time}

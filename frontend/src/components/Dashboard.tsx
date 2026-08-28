@@ -184,6 +184,19 @@ export default function Dashboard({ refreshTrigger }: Props) {
     );
   };
 
+  const getPlatformBadge = (platform?: string) => {
+    const isOpenTable = platform === 'opentable';
+    return (
+      <span
+        className={`inline-flex items-center px-2 py-0.5 rounded text-xs font-semibold ${
+          isOpenTable ? 'bg-red-100 text-red-700' : 'bg-blue-100 text-blue-700'
+        }`}
+      >
+        {isOpenTable ? 'OpenTable' : 'Resy'}
+      </span>
+    );
+  };
+
   if (loading) {
     return (
       <div className="flex justify-center items-center py-12">
@@ -232,6 +245,7 @@ export default function Dashboard({ refreshTrigger }: Props) {
                   <h3 className="text-xl font-semibold text-gray-900">
                     {reservation.restaurantName}
                   </h3>
+                  {getPlatformBadge(reservation.platform)}
                   {getStatusBadge(reservation.status)}
                 </div>
 
@@ -281,7 +295,7 @@ export default function Dashboard({ refreshTrigger }: Props) {
                   </div>
                 )}
 
-                {reservation.tokenStatus === 'invalid' && reservation.status === 'scheduled' && (
+                {reservation.platform !== 'opentable' && reservation.tokenStatus === 'invalid' && reservation.status === 'scheduled' && (
                   <div className="bg-orange-50 border border-orange-200 rounded-lg p-3 text-sm flex items-start gap-2 mt-2">
                     <AlertTriangle size={16} className="text-orange-500 shrink-0 mt-0.5" />
                     <div>

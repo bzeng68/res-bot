@@ -163,7 +163,7 @@ router.post('/', async (req, res) => {
         .then(async id => {
           if (id != null) {
             await updateReservation(reservation.id, {
-              credentials: { ...reservation.credentials, paymentMethodId: id },
+              credentials: { platform: 'resy', authToken, paymentMethodId: id },
             });
             console.log(`💳 Cached payment method ID ${id} for ${reservation.restaurantName}`);
           }

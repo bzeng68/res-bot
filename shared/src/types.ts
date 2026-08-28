@@ -39,7 +39,7 @@ export interface ReservationRequest {
   timeRange: TimeRange;
   partySize: number;
   userEmail: string;
-  credentials: PlatformCredentials;
+  credentials?: PlatformCredentials; // OpenTable jobs have none - auth is the runner's signed-in browser session
   status: ReservationStatus;
   createdAt: string;
   scheduledPollTime?: string;

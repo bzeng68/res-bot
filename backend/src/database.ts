@@ -104,7 +104,7 @@ export async function updateReservation(
   if (updates.credentials) {
     merged.credentials = {
       platform: 'resy',
-      authToken: updates.credentials.authToken ? encryptPassword(updates.credentials.authToken) : current.credentials.authToken,
+      authToken: updates.credentials.authToken ? encryptPassword(updates.credentials.authToken) : current.credentials?.authToken,
       ...(updates.credentials.paymentMethodId != null && { paymentMethodId: updates.credentials.paymentMethodId }),
     };
   }
