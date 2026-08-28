@@ -25,6 +25,7 @@
     pollIntervalMs: 5_000,
     cooldownMs: 60_000,
     jobTimeoutMs: 10 * 60_000,
+    tickMs: 150,
   };
 
   const ACTIVE_JOB_KEY = 'otr_activeJob';
@@ -104,6 +105,17 @@
     return `${base}search?query=${query}&date=${date}&time=${start}&end=${end}&partySize=${job.partySize}`;
   }
 
+  // Backend returns a job once it's within OPENTABLE_JOB_LOOKAHEAD_MS of its
+  // scheduledPollTime (see backend/src/utils/opentableJobs.ts), not only once
+  // it's already due - this computes the exact remaining gap so pollForJobs
+  // can setTimeout-wait it out precisely instead of firing as soon as seen.
+  function computeFireDelay(job, now = Date.now()) {
+    if (!job.scheduledPollTime) return 0;
+    const fireAt = Date.parse(job.scheduledPollTime);
+    if (Number.isNaN(fireAt)) return 0;
+    return Math.max(0, fireAt - now);
+  }
+
   // ---- DOM helpers ----
 
   function isVisible(el) {
@@ -165,17 +177,21 @@
   }
 
   // candidates: [{ selector, text?, exact? }] - first visible match wins.
-  // Returns the matched candidate (not just true/false) so callers can log
+  // Returns { candidate, el } (not just true/false) so callers can log
   // exactly what was selected, not just that something was.
-  function clickFirstVisible(candidates) {
+  function findFirstVisible(candidates) {
     for (const c of candidates) {
       const el = findVisible(c.selector, c.text, c.exact);
-      if (el) {
-        simulateClick(el);
-        return c;
-      }
+      if (el) return { candidate: c, el };
     }
     return null;
+  }
+
+  function clickFirstVisible(candidates) {
+    const found = findFirstVisible(candidates);
+    if (!found) return null;
+    simulateClick(found.el);
+    return found.candidate;
   }
 
   function describeCandidate(c) {
@@ -260,11 +276,42 @@
     gmSet(RECENT_KEY, { ...gmGet(RECENT_KEY, {}), [job.id]: Date.now() });
   }
 
+  let tickCount = 0;
+  let lastStageChoice; // dedupe: only log stage-click when the result changes
+  let lastStageClickKey = null;
+  let lastStageClickAt = 0;
+  // Once a candidate is clicked, don't re-click the exact same one on the
+  // same page every 150ms while waiting for it to take effect (e.g. a
+  // "Complete reservation" submit whose result takes a moment to land) -
+  // but do retry after this grace period in case the click genuinely didn't
+  // register the first time.
+  const STAGE_CLICK_COOLDOWN_MS = 2000;
+
   // One tick of the loop: check URL/page state, click whatever's relevant,
   // return true when the job has reached a terminal state.
   async function tick(job) {
-    log('action=tick path=', location.pathname, 'selectedTime=', job.selectedTime || '(none yet)');
-    dismissCommonPrompts();
+    tickCount++;
+
+    // Pre-navigated ahead of the fire time: just wait (cheaply - skip the
+    // rest of the tick entirely) until it arrives, then reload right at T=0
+    // for fresh availability data before interacting with anything.
+    const delay = computeFireDelay(job);
+    if (delay > 0) {
+      if (delay <= CONFIG.tickMs) {
+        await sleep(delay);
+        log('action=fire choice=', job.id);
+        location.reload();
+      } else if (!job.reportedWaiting) {
+        job.reportedWaiting = true;
+        gmSet(ACTIVE_JOB_KEY, job);
+        log('action=wait-on-page choice=', job.id, `${delay}ms remaining until`, job.scheduledPollTime);
+      }
+      return false;
+    }
+
+    // Throttle the consent-banner scan to every other tick once the page has
+    // had one clean check - always runs on tick 1 of every fresh page load.
+    if (tickCount % 2 === 1) dismissCommonPrompts();
 
     if (isConfirmationPage()) {
       const code = extractConfirmationCode(document.body.innerText.toLowerCase());
@@ -276,11 +323,14 @@
     if (!job.selectedTime) {
       const preferredTimes = job.timeRange.preferredTimes?.length ? job.timeRange.preferredTimes : [job.timeRange.start];
       const availableTimes = scanAvailableTimes();
-      log('action=scan-times choice=', availableTimes.length ? availableTimes.join(', ') : '(none found yet)');
       if (availableTimes.length && !job.reportedSlots) {
         job.reportedSlots = true;
         gmSet(ACTIVE_JOB_KEY, job);
-        await reportStatus(job.id, 'slots_found', { slotCount: availableTimes.length, availableTimes: availableTimes.slice(0, 10) });
+        log('action=slots-found choice=', availableTimes.join(', '));
+        // Fire-and-forget: this is informational logging, not a step the
+        // booking flow depends on - don't let a network round-trip block
+        // the next click attempt.
+        reportStatus(job.id, 'slots_found', { slotCount: availableTimes.length, availableTimes: availableTimes.slice(0, 10) });
       }
 
       for (const time of preferredTimes) {
@@ -290,17 +340,30 @@
             log('action=select-time choice=', time, `(matched label "${label}")`);
             job.selectedTime = time;
             gmSet(ACTIVE_JOB_KEY, job);
-            await reportStatus(job.id, 'slot_selected', { selectedTime: time, url: location.href });
+            reportStatus(job.id, 'slot_selected', { selectedTime: time, url: location.href }); // fire-and-forget
             return false;
           }
         }
       }
-      log('action=select-time choice=(no preferred time matched this tick)');
       return false;
     }
 
-    const stageMatch = clickFirstVisible(selectorsForCurrentStage());
-    log('action=stage-click choice=', stageMatch ? describeCandidate(stageMatch) : '(nothing matched this tick)');
+    const found = findFirstVisible(selectorsForCurrentStage());
+    const choice = found ? describeCandidate(found.candidate) : '(nothing matched)';
+    if (choice !== lastStageChoice) {
+      lastStageChoice = choice;
+      log('action=stage-click path=', location.pathname, 'choice=', choice);
+    }
+
+    if (found) {
+      const key = `${location.pathname}|${choice}`;
+      const now = Date.now();
+      if (key !== lastStageClickKey || now - lastStageClickAt > STAGE_CLICK_COOLDOWN_MS) {
+        lastStageClickKey = key;
+        lastStageClickAt = now;
+        simulateClick(found.el);
+      }
+    }
     return false;
   }
 
@@ -328,9 +391,14 @@
         continue;
       }
 
+      // Navigate immediately rather than sleeping here first - pre-loading
+      // the restaurant page ahead of the fire time (the backend's lookahead
+      // window guarantees several seconds of runway) means the page/assets
+      // are already warm by the time the fire moment actually arrives.
+      // tick() waits out any remaining delay and reloads right at T=0.
       const url = buildOpenTableUrl(job);
       log('action=pickup-job choice=', job.id, url);
-      await reportStatus(job.id, 'runner_started', { url, partySize: job.partySize });
+      reportStatus(job.id, 'runner_started', { url, partySize: job.partySize }); // fire-and-forget - don't delay navigation
 
       gmSet(ACTIVE_JOB_KEY, {
         id: job.id,
@@ -340,6 +408,7 @@
         timeRange: job.timeRange,
         partySize: job.partySize,
         runUntil: job.runUntil,
+        scheduledPollTime: job.scheduledPollTime,
         startedAt: now,
       });
 
@@ -383,9 +452,24 @@
         log('tick failed', err);
       }
 
-      await sleep(300);
+      await sleep(CONFIG.tickMs);
     }
   }
 
-  runLoop();
+  // Testability hook: inert in the real Tampermonkey/browser runtime (there's
+  // no `module` global there), but lets a plain Node test `require()` this
+  // file to unit-test the pure logic below without starting the live loop.
+  if (typeof module !== 'undefined' && module.exports) {
+    module.exports = {
+      buildTimeLabels,
+      normalizeText,
+      extractConfirmationCode,
+      buildOpenTableUrl,
+      selectorsForCurrentStage,
+      computeFireDelay,
+      isConfirmationPage,
+    };
+  } else {
+    runLoop();
+  }
 })();

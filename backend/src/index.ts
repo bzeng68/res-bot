@@ -8,6 +8,7 @@ import restaurantRoutes from './routes/restaurants.js';
 import internalRoutes from './routes/internal.js';
 import { startScheduler } from './scheduler/index.js';
 import { getAllReservations } from './database.js';
+import { isOpenTableJobDue } from './utils/opentableJobs.js';
 
 dotenv.config();
 
@@ -38,7 +39,7 @@ app.get('/api/opentable/jobs', async (req, res) => {
     }
 
     const reservations = await getAllReservations();
-    const jobs = reservations.filter(r => r.platform === 'opentable' && (r.status === 'scheduled' || r.status === 'polling'));
+    const jobs = reservations.filter(r => isOpenTableJobDue(r));
     res.json({ success: true, data: jobs });
   } catch (error) {
     console.error('Error fetching OpenTable jobs:', error);
