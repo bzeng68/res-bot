@@ -4,6 +4,12 @@ Terraform for res-bot's GCP deployment: two Cloud Run services (control plane
 + worker), a Cloud Tasks queue for one-time booking triggers, Firestore,
 Artifact Registry, and the service accounts/IAM tying them together.
 
+**This infra is Resy-only.** OpenTable reservations never enqueue a Cloud
+Task and never touch the worker service — they're booked by a Tampermonkey
+userscript running in the user's own browser (see
+[`../tampermonkey/README.md`](../tampermonkey/README.md)), which just needs
+the deployed control plane to be reachable for polling/status callbacks.
+
 ## Resources created
 
 - Artifact Registry repo for container images
