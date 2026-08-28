@@ -26,6 +26,7 @@
     cooldownMs: 60_000,
     jobTimeoutMs: 10 * 60_000,
     tickMs: 150,
+    anchorTimeoutMs: 1_500,
   };
 
   const ACTIVE_JOB_KEY = 'otr_activeJob';
@@ -93,11 +94,12 @@
   // Party size and date are passed as query params and OpenTable's page
   // honors them, so there's no separate DOM step needed for either. The time
   // param anchors which ~30-45min neighborhood of times gets shown, so it
-  // must be the top preferred time - not timeRange.start - or a preference
-  // far from the range's start (e.g. 7pm preferred in a 5-10pm range) would
-  // never appear in the results at all.
+  // must be a preferred time - not timeRange.start - or a preference far
+  // from the range's start (e.g. 7pm preferred in a 5-10pm range) would
+  // never appear in the results at all. anchorIndex selects which preferred
+  // time to anchor on (see tick()'s re-anchor sweep for when it advances).
   function buildOpenTableUrl(job) {
-    const anchorTime = job.timeRange.preferredTimes?.[0] || job.timeRange.start;
+    const anchorTime = job.timeRange.preferredTimes?.[job.anchorIndex || 0] || job.timeRange.start;
     const base = 'https://www.opentable.com/';
     const slug = job.restaurantSlug?.trim();
     if (slug) {
@@ -239,6 +241,25 @@
     return Array.from(times);
   }
 
+  // True if `time` (24h "HH:MM") already appeared in a previous anchor's
+  // scanned results - i.e. we've already effectively checked it (the
+  // click-matching loop tries every preferred time against whatever's
+  // currently shown, so if it were selectable it would already be selected).
+  function timeAlreadySeen(time, seenTimes) {
+    const labels = buildTimeLabels(time).map(normalizeText);
+    return seenTimes.some((seen) => labels.includes(normalizeText(seen)));
+  }
+
+  // Next preferred-time index (after currentIndex) worth trying as a fresh
+  // URL anchor - skipping any already covered by a previously-scanned
+  // anchor's neighborhood, since those are already known not to be bookable.
+  function findNextAnchorIndex(preferredTimes, currentIndex, seenTimes) {
+    for (let i = currentIndex + 1; i < preferredTimes.length; i++) {
+      if (!timeAlreadySeen(preferredTimes[i], seenTimes)) return i;
+    }
+    return null;
+  }
+
   function isConfirmationPage() {
     const url = location.href.toLowerCase();
     if (url.includes('/confirmation') || url.includes('/booked')) return true;
@@ -326,10 +347,19 @@
     }
 
     if (!job.selectedTime) {
+      // Measured from the first tick we actually look at this anchor's
+      // rendered content - not from pickup/navigation time, since pre-nav
+      // waiting and page-load time shouldn't count against its budget.
+      if (!job.anchorStartedAt) {
+        job.anchorStartedAt = Date.now();
+        gmSet(ACTIVE_JOB_KEY, job);
+      }
+
       const preferredTimes = job.timeRange.preferredTimes?.length ? job.timeRange.preferredTimes : [job.timeRange.start];
       const availableTimes = scanAvailableTimes();
       if (availableTimes.length && !job.reportedSlots) {
         job.reportedSlots = true;
+        job.seenTimes = Array.from(new Set([...(job.seenTimes || []), ...availableTimes]));
         gmSet(ACTIVE_JOB_KEY, job);
         log('action=slots-found choice=', availableTimes.join(', '));
         // Fire-and-forget: this is informational logging, not a step the
@@ -350,6 +380,31 @@
           }
         }
       }
+
+      // None of the preferred times are showing near this anchor. Once it's
+      // had a fair chance to render and be tried, sweep to the next
+      // not-yet-covered preferred time as a fresh anchor rather than
+      // sitting on a neighborhood that will never contain what we want.
+      if (Date.now() - job.anchorStartedAt > CONFIG.anchorTimeoutMs) {
+        const nextIndex = findNextAnchorIndex(preferredTimes, job.anchorIndex || 0, job.seenTimes || []);
+        if (nextIndex != null) {
+          job.anchorIndex = nextIndex;
+          job.reportedSlots = false;
+          job.anchorStartedAt = null;
+          gmSet(ACTIVE_JOB_KEY, job);
+          const url = buildOpenTableUrl(job);
+          log('action=re-anchor choice=', preferredTimes[nextIndex], url);
+          location.href = url;
+          return false;
+        }
+
+        await finishJob(job, 'booking_failed', {
+          error: 'No preferred time was available near any anchor tried',
+          finalUrl: location.href,
+        });
+        return true;
+      }
+
       return false;
     }
 
@@ -415,6 +470,8 @@
         runUntil: job.runUntil,
         scheduledPollTime: job.scheduledPollTime,
         startedAt: now,
+        anchorIndex: 0,
+        seenTimes: [],
       });
 
       location.href = url;
@@ -473,6 +530,8 @@
       selectorsForCurrentStage,
       computeFireDelay,
       isConfirmationPage,
+      timeAlreadySeen,
+      findNextAnchorIndex,
     };
   } else {
     runLoop();

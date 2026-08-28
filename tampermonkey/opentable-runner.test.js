@@ -85,6 +85,40 @@ test('buildOpenTableUrl anchors on the top preferred time, not the range start',
   );
 });
 
+test('buildOpenTableUrl anchors on the preferred time at anchorIndex when the sweep has advanced', () => {
+  const url = runner.buildOpenTableUrl({
+    restaurantSlug: 'gyu-kaku-japanese-bbq-brookline-beacon-street',
+    restaurantName: 'Gyu-Kaku',
+    targetDate: '2026-09-02',
+    timeRange: { start: '17:00', end: '22:00', preferredTimes: ['19:00', '18:00', '21:00'] },
+    partySize: 2,
+    anchorIndex: 2,
+  });
+  assert.match(url, /dateTime=2026-09-02%2021%3A00/);
+});
+
+test('timeAlreadySeen matches a preferred time against a previously scanned display string', () => {
+  assert.equal(runner.timeAlreadySeen('19:00', ['6:30 PM', '6:45 PM', '7:00 PM']), true);
+  assert.equal(runner.timeAlreadySeen('19:00', ['4:30 PM', '4:45 PM', '5:00 PM']), false);
+  // Non-breaking-space / exact-format resilience.
+  assert.equal(runner.timeAlreadySeen('09:00', ['9:00 AM']), true);
+});
+
+test('findNextAnchorIndex skips preferred times already covered by a previous anchor scan', () => {
+  const preferredTimes = ['19:00', '19:15', '17:00', '21:00'];
+  // Anchor 0 (19:00) scanned a window that happened to also show 19:15 -
+  // that one's already known not to be bookable (the click loop would have
+  // taken it), so the sweep should skip straight past it to 17:00.
+  const seenTimes = ['6:30 PM', '6:45 PM', '7:00 PM', '7:15 PM', '7:30 PM'];
+  assert.equal(runner.findNextAnchorIndex(preferredTimes, 0, seenTimes), 2);
+});
+
+test('findNextAnchorIndex returns null once every preferred time has been tried or covered', () => {
+  const preferredTimes = ['19:00', '19:15'];
+  const seenTimes = ['6:30 PM', '6:45 PM', '7:00 PM', '7:15 PM', '7:30 PM'];
+  assert.equal(runner.findNextAnchorIndex(preferredTimes, 0, seenTimes), null);
+});
+
 test('selectorsForCurrentStage targets the standard seating card on the seating-options page', () => {
   global.location.pathname = '/booking/seating-options';
   const selectors = runner.selectorsForCurrentStage();
