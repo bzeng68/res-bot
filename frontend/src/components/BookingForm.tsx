@@ -236,6 +236,7 @@ export default function BookingForm({ onSuccess }: Props) {
           <DateSelector
             value={selectedDate}
             onChange={setSelectedDate}
+            accent={platform === 'resy' ? 'primary' : 'red'}
           />
           {selectedDate && (
             <button
