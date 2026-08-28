@@ -68,6 +68,23 @@ test('buildOpenTableUrl falls back to search when no slug is known', () => {
   );
 });
 
+test('buildOpenTableUrl anchors on the top preferred time, not the range start', () => {
+  // OpenTable only shows a ~30-45min neighborhood of times around whatever
+  // the dateTime param says - a preferred time far from timeRange.start
+  // (e.g. 7pm preferred in a 5-10pm range) would never show up otherwise.
+  const url = runner.buildOpenTableUrl({
+    restaurantSlug: 'gyu-kaku-japanese-bbq-brookline-beacon-street',
+    restaurantName: 'Gyu-Kaku',
+    targetDate: '2026-09-02',
+    timeRange: { start: '17:00', end: '22:00', preferredTimes: ['19:00', '18:00'] },
+    partySize: 2,
+  });
+  assert.equal(
+    url,
+    'https://www.opentable.com/r/gyu-kaku-japanese-bbq-brookline-beacon-street?dateTime=2026-09-02%2019%3A00&partySize=2',
+  );
+});
+
 test('selectorsForCurrentStage targets the standard seating card on the seating-options page', () => {
   global.location.pathname = '/booking/seating-options';
   const selectors = runner.selectorsForCurrentStage();

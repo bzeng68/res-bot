@@ -91,16 +91,21 @@
   }
 
   // Party size and date are passed as query params and OpenTable's page
-  // honors them, so there's no separate DOM step needed for either.
+  // honors them, so there's no separate DOM step needed for either. The time
+  // param anchors which ~30-45min neighborhood of times gets shown, so it
+  // must be the top preferred time - not timeRange.start - or a preference
+  // far from the range's start (e.g. 7pm preferred in a 5-10pm range) would
+  // never appear in the results at all.
   function buildOpenTableUrl(job) {
+    const anchorTime = job.timeRange.preferredTimes?.[0] || job.timeRange.start;
     const base = 'https://www.opentable.com/';
     const slug = job.restaurantSlug?.trim();
     if (slug) {
-      return `${base}r/${slug}?dateTime=${encodeURIComponent(`${job.targetDate} ${job.timeRange.start}`)}&partySize=${job.partySize}`;
+      return `${base}r/${slug}?dateTime=${encodeURIComponent(`${job.targetDate} ${anchorTime}`)}&partySize=${job.partySize}`;
     }
     const query = encodeURIComponent(job.restaurantName);
     const date = encodeURIComponent(job.targetDate);
-    const start = encodeURIComponent(job.timeRange.start);
+    const start = encodeURIComponent(anchorTime);
     const end = encodeURIComponent(job.timeRange.end);
     return `${base}search?query=${query}&date=${date}&time=${start}&end=${end}&partySize=${job.partySize}`;
   }
