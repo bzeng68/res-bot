@@ -74,13 +74,44 @@ async function persistReservationUpdate(type: string, jobId: string, data: any) 
 
   if (status === 'slots_found') {
     const slotCount = data?.slotCount ?? 0;
-    await logAttempt(jobId, 'found_slot', `Found ${slotCount} time slot${slotCount === 1 ? '' : 's'} available`, data);
+    const near = data?.anchorTime ? ` near ${data.anchorTime}` : '';
+    await logAttempt(jobId, 'found_slot', `Found ${slotCount} time slot${slotCount === 1 ? '' : 's'} available${near}`, data);
     return;
   }
 
   if (status === 'slot_selected') {
     await updateReservationStatus(jobId, 'polling');
-    await logAttempt(jobId, 'found_slot', `Selected ${data?.selectedTime ?? 'preferred slot'}`, data);
+    await logAttempt(jobId, 'found_slot', data?.summary ?? `Selected ${data?.selectedTime ?? 'preferred slot'}`, data);
+    return;
+  }
+
+  if (status === 'anchor_exhausted') {
+    await logAttempt(
+      jobId,
+      'booking',
+      `No preferred time near ${data?.triedAnchor ?? 'anchor'}; trying next anchor ${data?.nextAnchor ?? '(none)'}`,
+      data,
+    );
+    return;
+  }
+
+  if (status === 'stage_advanced') {
+    await logAttempt(jobId, 'booking', `Selected ${data?.choice ?? 'next step'} on ${data?.path ?? 'booking page'}`, data);
+    return;
+  }
+
+  if (status === 'stage_blocked') {
+    await logAttempt(
+      jobId,
+      'error',
+      `"${data?.choice ?? 'button'}" is disabled on ${data?.path ?? 'booking page'} - a required field may need to be filled in manually`,
+      data,
+    );
+    return;
+  }
+
+  if (status === 'stage_stuck') {
+    await logAttempt(jobId, 'error', `Stuck on ${data?.path ?? 'booking page'}: no expected button found`, data);
     return;
   }
 
@@ -109,7 +140,12 @@ async function persistReservationUpdate(type: string, jobId: string, data: any) 
       error: data?.error ?? 'OpenTable runner failed',
     });
     await logAttempt(jobId, 'error', data?.error ?? 'OpenTable runner failed', data);
+    return;
   }
+
+  // Catch-all so a future/unhandled runner status still shows up in the
+  // reservation's log history instead of being silently dropped.
+  await logAttempt(jobId, 'booking', data?.message ?? `OpenTable runner status: ${status}`, data);
 }
 
 async function logAttempt(

@@ -173,3 +173,25 @@ test('isConfirmationPage returns false on an ordinary page', () => {
   global.document.querySelectorAll = () => [];
   assert.equal(runner.isConfirmationPage(), false);
 });
+
+test('isDisabled detects a disabled button or one flagged via aria-disabled', () => {
+  assert.equal(runner.isDisabled({ disabled: true }), true);
+  assert.equal(runner.isDisabled({ getAttribute: () => 'true' }), true);
+  assert.equal(runner.isDisabled({ disabled: false, getAttribute: () => null }), false);
+});
+
+test('describePageState surfaces disabled/checked flags for visible interactive elements', () => {
+  global.document.querySelectorAll = () => [
+    {
+      tagName: 'BUTTON', textContent: 'Complete reservation', disabled: true, getAttribute: () => null,
+      isConnected: true, getBoundingClientRect: () => ({ width: 10, height: 10 }),
+    },
+    {
+      tagName: 'INPUT', name: 'agree', checked: false, disabled: false, getAttribute: () => null,
+      isConnected: true, getBoundingClientRect: () => ({ width: 10, height: 10 }),
+    },
+  ];
+  const state = runner.describePageState();
+  assert.ok(state.some((s) => s.includes('button(disabled): complete reservation')));
+  assert.ok(state.some((s) => s.includes('input(unchecked): agree')));
+});

@@ -205,6 +205,35 @@
     return c.text != null ? `${c.selector} text~="${c.text}"` : c.selector;
   }
 
+  // A matched selector can be visible but non-functional (e.g. a submit
+  // button disabled until a required field/checkbox is filled) - clicking it
+  // every tick would silently do nothing forever. Surfacing this distinctly
+  // from "found nothing" is what makes that failure mode diagnosable.
+  function isDisabled(el) {
+    return !!(el.disabled || el.getAttribute?.('aria-disabled') === 'true');
+  }
+
+  // Snapshot of visible interactive elements, for reporting back to the
+  // backend when the runner is stuck - this is the only way to see what the
+  // page actually looked like after the fact, since there's no console access
+  // once the tab's closed.
+  function describePageState() {
+    const out = [];
+    for (const el of document.querySelectorAll('button, a, input[type="checkbox"], input[type="radio"]')) {
+      if (!isVisible(el)) continue;
+      const tag = el.tagName.toLowerCase();
+      const text = tag === 'input' ? (el.getAttribute('aria-label') || el.name || '') : normalizeText(el.textContent);
+      if (!text) continue;
+      const flags = [
+        isDisabled(el) && 'disabled',
+        tag === 'input' && (el.checked ? 'checked' : 'unchecked'),
+      ].filter(Boolean).join(',');
+      out.push(flags ? `${tag}(${flags}): ${text}` : `${tag}: ${text}`);
+      if (out.length >= 20) break;
+    }
+    return out;
+  }
+
   function dismissCommonPrompts() {
     clickFirstVisible([
       { selector: '#onetrust-reject-all-handler' },
@@ -311,7 +340,11 @@
   // "Complete reservation" submit whose result takes a moment to land) -
   // but do retry after this grace period in case the click genuinely didn't
   // register the first time.
-  const STAGE_CLICK_COOLDOWN_MS = 2000;
+  const STAGE_CLICK_COOLDOWN_MS = 1000;
+  // Throttle for "stuck" diagnostics (nothing matched / matched-but-disabled)
+  // so a page stuck for minutes doesn't spam a report every tick.
+  const STUCK_REPORT_INTERVAL_MS = 5000;
+  let lastStuckReportAt = 0;
 
   // One tick of the loop: check URL/page state, click whatever's relevant,
   // return true when the job has reached a terminal state.
@@ -347,35 +380,47 @@
     }
 
     if (!job.selectedTime) {
+      const preferredTimes = job.timeRange.preferredTimes?.length ? job.timeRange.preferredTimes : [job.timeRange.start];
+      const anchorTime = preferredTimes[job.anchorIndex || 0];
+
       // Measured from the first tick we actually look at this anchor's
       // rendered content - not from pickup/navigation time, since pre-nav
       // waiting and page-load time shouldn't count against its budget.
       if (!job.anchorStartedAt) {
         job.anchorStartedAt = Date.now();
+        job.anchorsTried = [...(job.anchorsTried || []), anchorTime];
         gmSet(ACTIVE_JOB_KEY, job);
       }
 
-      const preferredTimes = job.timeRange.preferredTimes?.length ? job.timeRange.preferredTimes : [job.timeRange.start];
       const availableTimes = scanAvailableTimes();
       if (availableTimes.length && !job.reportedSlots) {
         job.reportedSlots = true;
         job.seenTimes = Array.from(new Set([...(job.seenTimes || []), ...availableTimes]));
         gmSet(ACTIVE_JOB_KEY, job);
-        log('action=slots-found choice=', availableTimes.join(', '));
+        log('action=slots-found choice=', `near ${anchorTime}:`, availableTimes.join(', '));
         // Fire-and-forget: this is informational logging, not a step the
         // booking flow depends on - don't let a network round-trip block
         // the next click attempt.
-        reportStatus(job.id, 'slots_found', { slotCount: availableTimes.length, availableTimes: availableTimes.slice(0, 10) });
+        reportStatus(job.id, 'slots_found', {
+          anchorTime,
+          slotCount: availableTimes.length,
+          availableTimes: availableTimes.slice(0, 10),
+          anchorsTried: job.anchorsTried,
+        });
       }
 
       for (const time of preferredTimes) {
         for (const label of buildTimeLabels(time)) {
           const matched = clickFirstVisible([{ selector: 'button', text: label }, { selector: 'a', text: label }]);
           if (matched) {
-            log('action=select-time choice=', time, `(matched label "${label}")`);
+            const summary = job.anchorsTried.length > 1
+              ? `tried ${job.anchorsTried.join(' -> ')}, ${time} worked`
+              : `${time} worked on the first try`;
+            log('action=select-time choice=', time, `(matched label "${label}")`, summary);
             job.selectedTime = time;
             gmSet(ACTIVE_JOB_KEY, job);
-            reportStatus(job.id, 'slot_selected', { selectedTime: time, url: location.href }); // fire-and-forget
+            // Fire-and-forget - see note above.
+            reportStatus(job.id, 'slot_selected', { selectedTime: time, url: location.href, anchorsTried: job.anchorsTried, summary });
             return false;
           }
         }
@@ -394,12 +439,19 @@
           gmSet(ACTIVE_JOB_KEY, job);
           const url = buildOpenTableUrl(job);
           log('action=re-anchor choice=', preferredTimes[nextIndex], url);
+          // Fire-and-forget - the actual re-navigation below is time-critical,
+          // this is just visibility into the sweep for the dashboard.
+          reportStatus(job.id, 'anchor_exhausted', { triedAnchor: anchorTime, nextAnchor: preferredTimes[nextIndex], anchorsTried: job.anchorsTried });
           location.href = url;
           return false;
         }
 
+        const summary = `tried ${job.anchorsTried.join(' -> ')}, none had a matching slot`;
+        log('action=booking-failed choice=', summary);
         await finishJob(job, 'booking_failed', {
           error: 'No preferred time was available near any anchor tried',
+          summary,
+          anchorsTried: job.anchorsTried,
           finalUrl: location.href,
         });
         return true;
@@ -415,14 +467,41 @@
       log('action=stage-click path=', location.pathname, 'choice=', choice);
     }
 
-    if (found) {
-      const key = `${location.pathname}|${choice}`;
+    // Nothing on this page matched any known selector - report periodically
+    // so a stall here (e.g. an unexpected interstitial) is diagnosable after
+    // the fact instead of only visible in a console nobody was watching.
+    if (!found) {
       const now = Date.now();
-      if (key !== lastStageClickKey || now - lastStageClickAt > STAGE_CLICK_COOLDOWN_MS) {
+      if (now - lastStuckReportAt > STUCK_REPORT_INTERVAL_MS) {
+        lastStuckReportAt = now;
+        reportStatus(job.id, 'stage_stuck', { path: location.pathname, visible: describePageState() }); // fire-and-forget
+      }
+      return false;
+    }
+
+    const key = `${location.pathname}|${choice}`;
+    const now = Date.now();
+
+    // A matched button can be visible but disabled (e.g. a required field or
+    // agreement checkbox isn't filled in yet) - clicking it does nothing, so
+    // report it distinctly from a normal click instead of silently retrying
+    // forever until the reservation's hold times out.
+    if (isDisabled(found.el)) {
+      if (key !== lastStageClickKey || now - lastStageClickAt > STUCK_REPORT_INTERVAL_MS) {
         lastStageClickKey = key;
         lastStageClickAt = now;
-        simulateClick(found.el);
+        log('action=stage-blocked path=', location.pathname, 'choice=', choice);
+        reportStatus(job.id, 'stage_blocked', { path: location.pathname, choice, visible: describePageState() }); // fire-and-forget
       }
+      return false;
+    }
+
+    if (key !== lastStageClickKey || now - lastStageClickAt > STAGE_CLICK_COOLDOWN_MS) {
+      lastStageClickKey = key;
+      lastStageClickAt = now;
+      simulateClick(found.el);
+      const isFinal = found.candidate.selector === '#complete-reservation' || found.candidate.selector === '[data-test="complete-reservation-button"]';
+      reportStatus(job.id, isFinal ? 'booking_submitted' : 'stage_advanced', { path: location.pathname, choice }); // fire-and-forget
     }
     return false;
   }
@@ -472,6 +551,7 @@
         startedAt: now,
         anchorIndex: 0,
         seenTimes: [],
+        anchorsTried: [],
       });
 
       location.href = url;
@@ -532,6 +612,8 @@
       isConfirmationPage,
       timeAlreadySeen,
       findNextAnchorIndex,
+      isDisabled,
+      describePageState,
     };
   } else {
     runLoop();
