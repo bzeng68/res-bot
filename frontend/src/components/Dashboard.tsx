@@ -580,7 +580,7 @@ export default function Dashboard({ refreshTrigger }: Props) {
                                   <summary className="text-xs text-gray-500 cursor-pointer hover:text-gray-700">
                                     Show raw JSON
                                   </summary>
-                                  <pre className="mt-1 p-2 bg-white rounded text-xs overflow-x-auto border border-gray-300 text-gray-800">
+                                  <pre className="mt-1 p-2 bg-white rounded text-xs whitespace-pre-wrap break-all border border-gray-300 text-gray-800 max-w-full">
                                     {JSON.stringify(attempt.details, null, 2)}
                                   </pre>
                                 </details>
