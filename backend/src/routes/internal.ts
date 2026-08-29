@@ -101,12 +101,8 @@ async function persistReservationUpdate(type: string, jobId: string, data: any) 
   }
 
   if (status === 'stage_blocked') {
-    await logAttempt(
-      jobId,
-      'error',
-      `"${data?.choice ?? 'button'}" is disabled on ${data?.path ?? 'booking page'} - a required field may need to be filled in manually`,
-      data,
-    );
+    const reason = data?.reason ?? 'a required field may need to be filled in manually';
+    await logAttempt(jobId, 'error', `Can't submit "${data?.choice ?? 'button'}" on ${data?.path ?? 'booking page'} - ${reason}`, data);
     return;
   }
 

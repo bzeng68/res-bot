@@ -234,6 +234,38 @@
     return out;
   }
 
+  // The final "complete reservation" review page (shown when the restaurant
+  // requires a card hold) has two custom-styled checkboxes: `tcAccepted`
+  // (terms and conditions - required, the submit button rejects the booking
+  // if left unchecked) and `optInCollectPoints` (loyalty points - optional,
+  // never blocks submission). Both render a real `<input type="checkbox">`
+  // visually hidden behind a custom SVG icon, so isVisible() fails on the
+  // input itself - click its wrapping <label> instead, whose native click()
+  // forwards activation to the input exactly like a real click would.
+  const REQUIRED_OPT_IN_ID = 'tcAccepted';
+  const OPTIONAL_OPT_IN_IDS = ['optInCollectPoints'];
+
+  function clickCheckboxById(id) {
+    const input = document.getElementById(id);
+    if (!input || input.checked) return;
+    const target = isVisible(input) ? input : input.closest('label');
+    if (target && isVisible(target)) simulateClick(target);
+  }
+
+  function checkBookingDetailsOptIns() {
+    clickCheckboxById(REQUIRED_OPT_IN_ID);
+    for (const id of OPTIONAL_OPT_IN_IDS) clickCheckboxById(id);
+  }
+
+  // True if there's nothing blocking submission on the required checkbox's
+  // account - either it's already checked, or (on restaurants that don't
+  // require a card) it isn't on the page at all, in which case there's
+  // nothing to require.
+  function isTermsAccepted() {
+    const box = document.getElementById(REQUIRED_OPT_IN_ID);
+    return !box || box.checked;
+  }
+
   function dismissCommonPrompts() {
     clickFirstVisible([
       { selector: '#onetrust-reject-all-handler' },
@@ -460,6 +492,12 @@
       return false;
     }
 
+    // Best-effort every tick, cheap (two getElementById lookups) even on
+    // pages where neither checkbox exists - required box gets clicked as
+    // soon as it renders, well before the submit button's cooldown would let
+    // a click through, so this normally costs zero extra ticks.
+    checkBookingDetailsOptIns();
+
     const found = findFirstVisible(selectorsForCurrentStage());
     const choice = found ? describeCandidate(found.candidate) : '(nothing matched)';
     if (choice !== lastStageChoice) {
@@ -481,11 +519,31 @@
 
     const key = `${location.pathname}|${choice}`;
     const now = Date.now();
+    const isFinal = found.candidate.selector === '#complete-reservation' || found.candidate.selector === '[data-test="complete-reservation-button"]';
 
-    // A matched button can be visible but disabled (e.g. a required field or
-    // agreement checkbox isn't filled in yet) - clicking it does nothing, so
-    // report it distinctly from a normal click instead of silently retrying
-    // forever until the reservation's hold times out.
+    // Submitting without the required terms checkbox just bounces back with a
+    // validation error, so withhold the click rather than hammering it - but
+    // only when the checkbox is actually present and our auto-check above
+    // hasn't (yet, or ever) landed. Restaurants with no card hold never have
+    // this checkbox at all, so isTermsAccepted() is a no-op for them.
+    if (isFinal && !isTermsAccepted()) {
+      if (now - lastStuckReportAt > STUCK_REPORT_INTERVAL_MS) {
+        lastStuckReportAt = now;
+        log('action=terms-pending path=', location.pathname);
+        reportStatus(job.id, 'stage_blocked', {
+          path: location.pathname,
+          choice,
+          reason: 'terms-and-conditions checkbox is unchecked and could not be auto-checked',
+          visible: describePageState(),
+        }); // fire-and-forget
+      }
+      return false;
+    }
+
+    // A matched button can be visible but disabled (e.g. a required field
+    // isn't filled in yet) - clicking it does nothing, so report it
+    // distinctly from a normal click instead of silently retrying forever
+    // until the reservation's hold times out.
     if (isDisabled(found.el)) {
       if (key !== lastStageClickKey || now - lastStageClickAt > STUCK_REPORT_INTERVAL_MS) {
         lastStageClickKey = key;
@@ -500,7 +558,6 @@
       lastStageClickKey = key;
       lastStageClickAt = now;
       simulateClick(found.el);
-      const isFinal = found.candidate.selector === '#complete-reservation' || found.candidate.selector === '[data-test="complete-reservation-button"]';
       reportStatus(job.id, isFinal ? 'booking_submitted' : 'stage_advanced', { path: location.pathname, choice }); // fire-and-forget
     }
     return false;
@@ -614,6 +671,7 @@
       findNextAnchorIndex,
       isDisabled,
       describePageState,
+      isTermsAccepted,
     };
   } else {
     runLoop();
