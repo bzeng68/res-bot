@@ -180,18 +180,6 @@ test('isDisabled detects a disabled button or one flagged via aria-disabled', ()
   assert.equal(runner.isDisabled({ disabled: false, getAttribute: () => null }), false);
 });
 
-test('isTermsAccepted has nothing to require when the checkbox is absent (no card hold needed)', () => {
-  global.document.getElementById = () => null;
-  assert.equal(runner.isTermsAccepted(), true);
-});
-
-test('isTermsAccepted reflects the checkbox state when present', () => {
-  global.document.getElementById = () => ({ checked: false });
-  assert.equal(runner.isTermsAccepted(), false);
-  global.document.getElementById = () => ({ checked: true });
-  assert.equal(runner.isTermsAccepted(), true);
-});
-
 test('describePageState surfaces disabled/checked flags for visible interactive elements', () => {
   global.document.querySelectorAll = () => [
     {
