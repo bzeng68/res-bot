@@ -127,11 +127,11 @@ export async function addBookingAttempt(id: string, attempt: BookingAttempt): Pr
     if (!snap.exists) return;
 
     const current = snap.data() as ReservationRequest;
-    // Keep only last 50 attempts to avoid bloat. attempt.details is
+    // Keep only last 100 attempts to avoid bloat. attempt.details is
     // arbitrary caller-provided data (e.g. { httpStatus, body } where
     // httpStatus is undefined for non-HTTP errors) — strip undefined
     // recursively or Firestore rejects the whole write.
-    const attempts = [...(current.bookingAttempts ?? []), attempt].slice(-50);
+    const attempts = [...(current.bookingAttempts ?? []), attempt].slice(-100);
     tx.update(ref, { bookingAttempts: deepStripUndefined(attempts) });
   });
 }

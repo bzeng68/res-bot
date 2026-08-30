@@ -366,7 +366,7 @@
   const STAGE_CLICK_COOLDOWN_MS = 1000;
   // Throttle for "stuck" diagnostics (nothing matched / matched-but-disabled)
   // so a page stuck for minutes doesn't spam a report every tick.
-  const STUCK_REPORT_INTERVAL_MS = 5000;
+  const STUCK_REPORT_INTERVAL_MS = 10000;
   let lastStuckReportAt = 0;
 
   // One tick of the loop: check URL/page state, click whatever's relevant,
