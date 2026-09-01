@@ -222,6 +222,27 @@ test('multiDayModalShowsTargetDate returns false when no day is selected yet (ca
   assert.equal(runner.multiDayModalShowsTargetDate('2026-09-21'), false);
 });
 
+test('isInsideUnverifiedFullAvailability blocks modal time slots until the date has been verified', () => {
+  // Regression test: the generic click-matching loop scans all button/a
+  // elements site-wide every tick, so without this gate it would click a
+  // modal time slot the instant the modal renders - before
+  // multiDayModalShowsTargetDate() ever got a chance to run.
+  runner.__setMultiDayModalVerifiedForTest(false);
+  const slotLink = { closest: (sel) => (sel.includes('time-slots-container') ? slotLink : null) };
+  assert.equal(runner.isInsideUnverifiedFullAvailability(slotLink), true);
+
+  runner.__setMultiDayModalVerifiedForTest(true);
+  assert.equal(runner.isInsideUnverifiedFullAvailability(slotLink), false);
+
+  runner.__setMultiDayModalVerifiedForTest(false); // leave clean for later tests
+});
+
+test('isInsideUnverifiedFullAvailability leaves elements outside the modal alone regardless of verification state', () => {
+  const outsideEl = { closest: () => null };
+  runner.__setMultiDayModalVerifiedForTest(false);
+  assert.equal(runner.isInsideUnverifiedFullAvailability(outsideEl), false);
+});
+
 test('describePageState surfaces disabled/checked flags for visible interactive elements', () => {
   global.document.querySelectorAll = () => [
     {

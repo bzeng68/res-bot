@@ -153,6 +153,30 @@
     return !!el.closest?.(EXCLUDED_CONTAINER_SELECTOR);
   }
 
+  // Blocks the generic click-matching loop from clicking a time slot inside
+  // the "View full availability" modal until multiDayModalShowsTargetDate()
+  // has actually verified its calendar matches our target date. Without
+  // this, the matching loop (which scans all button/a elements site-wide,
+  // every tick) would click a modal time slot the instant the modal renders
+  // - on the very tick it becomes visible, before the date-verification code
+  // ever runs - defeating the whole point of that check. multiDayModalVerified
+  // is a plain module-level flag, not persisted job state, because it's only
+  // meaningful for the lifetime of the current page load: any navigation (a
+  // fresh anchor, a new job) reruns this whole script from scratch and
+  // starts it back at false, which is exactly the reset behavior we want.
+  let multiDayModalVerified = false;
+  const MULTI_DAY_TIME_SLOTS_SELECTOR = '[data-test="multi-day-availability-modal-v2-time-slots-container"]';
+
+  function isInsideUnverifiedFullAvailability(el) {
+    return !multiDayModalVerified && !!el.closest?.(MULTI_DAY_TIME_SLOTS_SELECTOR);
+  }
+
+  // Test-only control for the module-level flag above - real code only ever
+  // sets it via the verified branch in tick()'s full-availability handling.
+  function __setMultiDayModalVerifiedForTest(value) {
+    multiDayModalVerified = value;
+  }
+
   // Scans every element matching `selector` (optionally filtered by text) and
   // returns the first one that's actually visible - NOT just the first
   // text/selector match, since a hidden/off-screen duplicate (responsive
@@ -162,6 +186,7 @@
     const wanted = text != null ? normalizeText(text) : null;
     for (const el of document.querySelectorAll(selector)) {
       if (isInsideExcludedBanner(el)) continue;
+      if (isInsideUnverifiedFullAvailability(el)) continue;
       if (wanted != null) {
         const t = normalizeText(el.textContent);
         const matches = exact ? t === wanted : t.includes(wanted);
@@ -336,8 +361,10 @@
   // the button isn't present at all), we fall back to the URL re-anchor
   // sweep below unchanged. The modal's time slots are ordinary <a> elements,
   // so the existing per-preferred-time matching loop above picks them up
-  // automatically on the next tick once the modal is open - no separate
-  // click-handling needed here.
+  // automatically on the next tick once the modal is open (findVisible's
+  // isInsideUnverifiedFullAvailability check keeps that loop from clicking
+  // them any earlier than that, before this verification has run) - no
+  // separate click-handling needed here.
   const MULTI_DAY_BUTTON_SELECTOR = '[data-test="multi-day-availability-button"]';
   const MULTI_DAY_MODAL_SELECTOR = '[data-test="multi-day-availability-modal"]';
   const MULTI_DAY_CALENDAR_SELECTOR = '[data-testid="multi-day-availability-calendar"]';
@@ -529,13 +556,17 @@
           job.multiDayModalTried = true;
           gmSet(ACTIVE_JOB_KEY, job);
           if (multiDayModalShowsTargetDate(job.targetDate)) {
+            multiDayModalVerified = true;
             log('action=full-availability-opened choice=', job.targetDate);
             reportStatus(job.id, 'full_availability_opened', { targetDate: job.targetDate }); // fire-and-forget
             return false; // next tick's matching loop above will find its slots
           }
+          // Date mismatch: multiDayModalVerified stays false, so the matching
+          // loop above continues ignoring this modal's contents. No need to
+          // close it here - the sweep below either reloads onto a fresh
+          // anchor or ends the job, both of which make the open modal moot.
           log('action=full-availability-date-mismatch choice=', job.targetDate);
           reportStatus(job.id, 'full_availability_skipped', { reason: 'calendar date did not match targetDate', targetDate: job.targetDate }); // fire-and-forget
-          clickFirstVisible([{ selector: '[data-test="modal-close"]' }]);
         } else if (Date.now() - job.multiDayModalOpenedAt > MULTI_DAY_MODAL_TIMEOUT_MS) {
           // Clicked it but the modal never appeared - don't wait forever.
           job.multiDayModalTried = true;
@@ -741,6 +772,8 @@
       isInsideExcludedBanner,
       expectedCalendarDayLabel,
       multiDayModalShowsTargetDate,
+      isInsideUnverifiedFullAvailability,
+      __setMultiDayModalVerifiedForTest,
     };
   } else {
     runLoop();
