@@ -35,9 +35,12 @@ whatever's relevant for that stage:
    `[data-test="noSpecialLink"]`) and the completion CTA
    (`#complete-reservation` / `[data-test="complete-reservation-button"]`).
    Once a selector is clicked, it won't be re-clicked on the same page for
-   `STAGE_CLICK_COOLDOWN_MS` (2s) — submitting a form can take a moment to
+   `STAGE_CLICK_COOLDOWN_MS` (1s) — submitting a form can take a moment to
    redirect, and hammering the same button every tick in the meantime risks
-   double-submission.
+   double-submission. On the final review page (shown when the restaurant
+   requires a card hold), the terms-and-conditions and loyalty-points
+   checkboxes are also checked automatically, best-effort — neither one
+   blocks submission if it can't be found.
 5. **Confirmation**: URL contains `/confirmation`/`/booked`, or a heading
    matches "you're booked"/"reservation confirmed" — reports
    `booking_success` with the extracted confirmation code.
@@ -65,12 +68,25 @@ OpenTable's page only shows a ~30-45min neighborhood of times around
 whatever the URL's `dateTime` param says. The script anchors on your
 *top-priority* preferred time (not the range start), so nearby preferences
 are covered for free. If none of your preferred times show up near that
-anchor within `CONFIG.anchorTimeoutMs` (1.5s), it re-navigates using the next
-preferred time (skipping any already ruled out by a previous anchor's scan)
-as a fresh anchor, repeating until one hits or all are exhausted — only then
-does it report `booking_failed`. This costs a page load per extra anchor
-checked, so it only kicks in when preferences are genuinely spread wider
-than one neighborhood covers.
+anchor within `CONFIG.anchorTimeoutMs` (1.5s), it tries two escalating
+fallbacks before giving up:
+
+1. **"View full availability"** (`[data-test="multi-day-availability-button"]`,
+   when the restaurant offers it) — opens a modal showing every time slot for
+   one date in a single click, no page reload. The script verifies the
+   modal's calendar actually has your target date selected (via the day
+   button's `aria-pressed`/`aria-label`) before trusting its time list — if
+   that doesn't check out, or the button isn't offered at all, it falls
+   through to the sweep below instead of risking a match against the wrong
+   date.
+2. **URL re-anchor sweep** — re-navigates using the next preferred time
+   (skipping any already ruled out by a previous anchor's scan) as a fresh
+   anchor, repeating until one hits or all are exhausted. This costs a full
+   page load per anchor checked, so it's the slower, last-resort path — the
+   full-availability modal above covers the same problem in one click
+   whenever it's available.
+
+Only once both are exhausted does it report `booking_failed`.
 
 ## Requirements / constraints
 
@@ -113,8 +129,10 @@ than one neighborhood covers.
 
 - Console logs are event-based, not per-tick: `action=pickup-job`,
   `action=wait-on-page` (once), `action=fire`, `action=slots-found`,
-  `action=select-time`, `action=re-anchor`, `action=stage-click` (only when
-  the match changes), `action=confirmed`.
+  `action=select-time`, `action=full-availability-opened` /
+  `action=full-availability-date-mismatch`, `action=re-anchor`,
+  `action=stage-click` (only when the match changes), `action=stage-blocked`,
+  `action=confirmed`.
 - Tampermonkey's icon → this script → menu commands:
   - **"OpenTable Runner: show status"** — logs the active job (if any) and
     the recently-finished cooldown map.

@@ -140,6 +140,19 @@
     return (s || '').replace(/\s+/g, ' ').trim().toLowerCase();
   }
 
+  // Known non-booking promo content that happens to use ordinary <button>
+  // markup - e.g. OpenTable's Chase Sapphire dining-program banner ("Unlock
+  // Sapphire Reserve access"), whose text can coincidentally contain words a
+  // fallback selector searches for. Excluded structurally by its stable
+  // data-test attribute rather than by matching against its wording, since a
+  // future rewording (different card partner, different copy) would just as
+  // easily collide again if we only excluded specific phrases.
+  const EXCLUDED_CONTAINER_SELECTOR = '[data-test="chase-dining-program-banner"]';
+
+  function isInsideExcludedBanner(el) {
+    return !!el.closest?.(EXCLUDED_CONTAINER_SELECTOR);
+  }
+
   // Scans every element matching `selector` (optionally filtered by text) and
   // returns the first one that's actually visible - NOT just the first
   // text/selector match, since a hidden/off-screen duplicate (responsive
@@ -148,6 +161,7 @@
   function findVisible(selector, text, exact) {
     const wanted = text != null ? normalizeText(text) : null;
     for (const el of document.querySelectorAll(selector)) {
+      if (isInsideExcludedBanner(el)) continue;
       if (wanted != null) {
         const t = normalizeText(el.textContent);
         const matches = exact ? t === wanted : t.includes(wanted);
@@ -312,6 +326,39 @@
     return null;
   }
 
+  // "View full availability" opens a modal showing every time slot for one
+  // specific date (not just the ~30-45min neighborhood the base page shows),
+  // keyed off whatever date is already selected on the page - which is
+  // always job.targetDate here, since that's what our URL's dateTime param
+  // drives. We still verify the calendar's selected day before trusting its
+  // time list, as a cheap safety net against ever booking the wrong date,
+  // rather than assuming that link always holds. If it doesn't check out (or
+  // the button isn't present at all), we fall back to the URL re-anchor
+  // sweep below unchanged. The modal's time slots are ordinary <a> elements,
+  // so the existing per-preferred-time matching loop above picks them up
+  // automatically on the next tick once the modal is open - no separate
+  // click-handling needed here.
+  const MULTI_DAY_BUTTON_SELECTOR = '[data-test="multi-day-availability-button"]';
+  const MULTI_DAY_MODAL_SELECTOR = '[data-test="multi-day-availability-modal"]';
+  const MULTI_DAY_CALENDAR_SELECTOR = '[data-testid="multi-day-availability-calendar"]';
+  const MULTI_DAY_MODAL_TIMEOUT_MS = 2_000;
+
+  // Matches react-day-picker's day-button aria-label format ("Tuesday,
+  // September 1" - weekday, month, day, no year). Parsed as UTC so this
+  // doesn't drift with the browser's local timezone - targetDate is a plain
+  // calendar date, not a timezone-aware instant.
+  function expectedCalendarDayLabel(targetDate) {
+    const [y, m, d] = targetDate.split('-').map(Number);
+    const date = new Date(Date.UTC(y, m - 1, d));
+    return date.toLocaleDateString('en-US', { weekday: 'long', month: 'long', day: 'numeric', timeZone: 'UTC' });
+  }
+
+  function multiDayModalShowsTargetDate(targetDate) {
+    const selectedDay = document.querySelector(`${MULTI_DAY_CALENDAR_SELECTOR} button[aria-pressed="true"]`);
+    if (!selectedDay) return false;
+    return normalizeText(selectedDay.getAttribute('aria-label') || '') === normalizeText(expectedCalendarDayLabel(targetDate));
+  }
+
   function isConfirmationPage() {
     const url = location.href.toLowerCase();
     if (url.includes('/confirmation') || url.includes('/booked')) return true;
@@ -336,8 +383,17 @@
     if (path.includes('/booking/specials')) {
       return [{ selector: '[data-test="noSpecialLink"]' }, { selector: '#complete-reservation' }, { selector: '[data-test="complete-reservation-button"]' }];
     }
-    // Landing page / review page fallback.
-    return [{ selector: '#complete-reservation' }, { selector: '[data-test="complete-reservation-button"]' }, { selector: 'button', text: 'reserve' }, { selector: 'button', text: 'confirm' }];
+    // Landing page / review page fallback. exact: true on the text-based
+    // candidates matters here - a substring match on "reserve" also matches
+    // unrelated marketing copy that happens to contain the word (e.g. a
+    // Chase card promo banner's "Unlock Sapphire Reserve access"), which
+    // isn't a real submit button but would get clicked every tick forever.
+    return [
+      { selector: '#complete-reservation' },
+      { selector: '[data-test="complete-reservation-button"]' },
+      { selector: 'button', text: 'reserve', exact: true },
+      { selector: 'button', text: 'confirm', exact: true },
+    ];
   }
 
   // ---- Job state machine ----
@@ -412,6 +468,8 @@
       if (!job.anchorStartedAt) {
         job.anchorStartedAt = Date.now();
         job.anchorsTried = [...(job.anchorsTried || []), anchorTime];
+        job.multiDayModalTried = false;
+        job.multiDayModalOpenedAt = null;
         gmSet(ACTIVE_JOB_KEY, job);
       }
 
@@ -450,10 +508,49 @@
       }
 
       // None of the preferred times are showing near this anchor. Once it's
-      // had a fair chance to render and be tried, sweep to the next
-      // not-yet-covered preferred time as a fresh anchor rather than
-      // sitting on a neighborhood that will never contain what we want.
-      if (Date.now() - job.anchorStartedAt > CONFIG.anchorTimeoutMs) {
+      // had a fair chance to render and be tried, try "View full
+      // availability" before resorting to the reload-based sweep below - it
+      // covers the whole day in one click instead of one page load per
+      // anchor tried.
+      if (Date.now() - job.anchorStartedAt > CONFIG.anchorTimeoutMs && !job.multiDayModalTried) {
+        if (!job.multiDayModalOpenedAt) {
+          const opened = clickFirstVisible([{ selector: MULTI_DAY_BUTTON_SELECTOR }]);
+          if (!opened) {
+            // Not offered for this restaurant - fall through to the sweep
+            // below immediately, no point waiting on something absent.
+            job.multiDayModalTried = true;
+            gmSet(ACTIVE_JOB_KEY, job);
+          } else {
+            job.multiDayModalOpenedAt = Date.now();
+            gmSet(ACTIVE_JOB_KEY, job);
+            return false;
+          }
+        } else if (findVisible(MULTI_DAY_MODAL_SELECTOR)) {
+          job.multiDayModalTried = true;
+          gmSet(ACTIVE_JOB_KEY, job);
+          if (multiDayModalShowsTargetDate(job.targetDate)) {
+            log('action=full-availability-opened choice=', job.targetDate);
+            reportStatus(job.id, 'full_availability_opened', { targetDate: job.targetDate }); // fire-and-forget
+            return false; // next tick's matching loop above will find its slots
+          }
+          log('action=full-availability-date-mismatch choice=', job.targetDate);
+          reportStatus(job.id, 'full_availability_skipped', { reason: 'calendar date did not match targetDate', targetDate: job.targetDate }); // fire-and-forget
+          clickFirstVisible([{ selector: '[data-test="modal-close"]' }]);
+        } else if (Date.now() - job.multiDayModalOpenedAt > MULTI_DAY_MODAL_TIMEOUT_MS) {
+          // Clicked it but the modal never appeared - don't wait forever.
+          job.multiDayModalTried = true;
+          gmSet(ACTIVE_JOB_KEY, job);
+        } else {
+          return false; // still waiting for the modal to render
+        }
+      }
+
+      // Last resort: sweep to the next not-yet-covered preferred time as a
+      // fresh URL anchor. Only reached once the full-availability modal
+      // above has been tried and ruled out for this attempt (absent, date
+      // mismatch, or timed out) - job.multiDayModalTried is false until then,
+      // which keeps this block from ever firing before that resolves.
+      if (Date.now() - job.anchorStartedAt > CONFIG.anchorTimeoutMs && job.multiDayModalTried) {
         const nextIndex = findNextAnchorIndex(preferredTimes, job.anchorIndex || 0, job.seenTimes || []);
         if (nextIndex != null) {
           job.anchorIndex = nextIndex;
@@ -641,6 +738,9 @@
       findNextAnchorIndex,
       isDisabled,
       describePageState,
+      isInsideExcludedBanner,
+      expectedCalendarDayLabel,
+      multiDayModalShowsTargetDate,
     };
   } else {
     runLoop();

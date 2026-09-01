@@ -85,6 +85,16 @@ async function persistReservationUpdate(type: string, jobId: string, data: any) 
     return;
   }
 
+  if (status === 'full_availability_opened') {
+    await logAttempt(jobId, 'booking', `Opened full-day availability for ${data?.targetDate ?? 'target date'}`, data);
+    return;
+  }
+
+  if (status === 'full_availability_skipped') {
+    await logAttempt(jobId, 'booking', `Skipped full-day availability (${data?.reason ?? 'unavailable'}); falling back to anchor sweep`, data);
+    return;
+  }
+
   if (status === 'anchor_exhausted') {
     await logAttempt(
       jobId,

@@ -138,6 +138,18 @@ test('selectorsForCurrentStage falls back to generic reserve/confirm selectors e
   assert.ok(selectors.some((c) => c.text === 'reserve'));
 });
 
+test('selectorsForCurrentStage requires an exact match on the generic reserve/confirm fallback', () => {
+  // A promo banner's marketing copy (e.g. "Unlock Sapphire Reserve access")
+  // must not match just because it contains the word "reserve" - only a
+  // button whose whole label is that word should count.
+  global.location.pathname = '/r/some-restaurant';
+  const selectors = runner.selectorsForCurrentStage();
+  const reserveCandidate = selectors.find((c) => c.text === 'reserve');
+  assert.equal(reserveCandidate.exact, true);
+  const confirmCandidate = selectors.find((c) => c.text === 'confirm');
+  assert.equal(confirmCandidate.exact, true);
+});
+
 test('computeFireDelay waits out the remaining gap until scheduledPollTime', () => {
   const now = Date.parse('2026-08-25T12:00:00.000Z');
   const job = { scheduledPollTime: '2026-08-25T12:00:07.000Z' };
@@ -178,6 +190,36 @@ test('isDisabled detects a disabled button or one flagged via aria-disabled', ()
   assert.equal(runner.isDisabled({ disabled: true }), true);
   assert.equal(runner.isDisabled({ getAttribute: () => 'true' }), true);
   assert.equal(runner.isDisabled({ disabled: false, getAttribute: () => null }), false);
+});
+
+test('isInsideExcludedBanner flags elements inside the Chase dining-program promo banner', () => {
+  const bannerButton = { closest: (sel) => (sel.includes('chase-dining-program-banner') ? bannerButton : null) };
+  assert.equal(runner.isInsideExcludedBanner(bannerButton), true);
+});
+
+test('isInsideExcludedBanner leaves ordinary elements alone', () => {
+  const normalButton = { closest: () => null };
+  assert.equal(runner.isInsideExcludedBanner(normalButton), false);
+});
+
+test('expectedCalendarDayLabel matches react-day-picker\'s day-button aria-label format', () => {
+  // Real example from OpenTable's "View full availability" modal:
+  // aria-label="Tuesday, September 1" for 2026-09-01 - weekday, month, day,
+  // no year, parsed as a plain UTC calendar date (not local-timezone-shifted).
+  assert.equal(runner.expectedCalendarDayLabel('2026-09-01'), 'Tuesday, September 1');
+  assert.equal(runner.expectedCalendarDayLabel('2026-09-21'), 'Monday, September 21');
+});
+
+test('multiDayModalShowsTargetDate confirms the calendar\'s selected day matches the job\'s target date', () => {
+  global.document.querySelector = (sel) =>
+    sel.includes('aria-pressed="true"') ? { getAttribute: () => 'Monday, September 21' } : null;
+  assert.equal(runner.multiDayModalShowsTargetDate('2026-09-21'), true);
+  assert.equal(runner.multiDayModalShowsTargetDate('2026-09-22'), false);
+});
+
+test('multiDayModalShowsTargetDate returns false when no day is selected yet (calendar still loading)', () => {
+  global.document.querySelector = () => null;
+  assert.equal(runner.multiDayModalShowsTargetDate('2026-09-21'), false);
 });
 
 test('describePageState surfaces disabled/checked flags for visible interactive elements', () => {
