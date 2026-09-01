@@ -22,7 +22,7 @@ function App() {
             </h1>
           </div>
           <p className="text-lg text-gray-400 max-w-2xl mx-auto">
-            Automated restaurant reservation bot for Resy.
+            Automated restaurant reservation bot for Resy and OpenTable.
             Never miss a hot reservation again.
           </p>
           <div className="mt-4 text-sm text-yellow-400">
