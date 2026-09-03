@@ -98,8 +98,30 @@
   // from the range's start (e.g. 7pm preferred in a 5-10pm range) would
   // never appear in the results at all. anchorIndex selects which preferred
   // time to anchor on (see tick()'s re-anchor sweep for when it advances).
+  //
+  // OpenTable only honours 30-minute increments in the dateTime query param -
+  // a :15/:45 anchor gets snapped to its half-hour by the site anyway, so
+  // anchoring on one burns a full page load to land on a neighbourhood we've
+  // either already seen or are about to. Snapping explicitly here decouples
+  // the two jobs preferredTimes was doing at once: it stays pure click
+  // priority (lead it with 17:15 and 17:15 is what gets booked) while the URL
+  // anchor is always a value the site actually honours.
+  //
+  // Floor rather than round, so the anchor never lands *after* the time we're
+  // aiming for - the page renders its slot neighbourhood forward from the
+  // anchor, so rounding 17:45 up to 18:00 could push 17:45 out of view.
+  const ANCHOR_INCREMENT_MINUTES = 30;
+
+  function snapToAnchorIncrement(time24) {
+    const [h, m] = String(time24).split(':').map(Number);
+    if (!Number.isFinite(h) || !Number.isFinite(m)) return time24;
+    const snapped = Math.floor(m / ANCHOR_INCREMENT_MINUTES) * ANCHOR_INCREMENT_MINUTES;
+    return `${String(h).padStart(2, '0')}:${String(snapped).padStart(2, '0')}`;
+  }
+
   function buildOpenTableUrl(job) {
-    const anchorTime = job.timeRange.preferredTimes?.[job.anchorIndex || 0] || job.timeRange.start;
+    const preferred = job.timeRange.preferredTimes?.[job.anchorIndex || 0] || job.timeRange.start;
+    const anchorTime = snapToAnchorIncrement(preferred);
     const base = 'https://www.opentable.com/';
     const slug = job.restaurantSlug?.trim();
     if (slug) {
@@ -382,9 +404,17 @@
   // Next preferred-time index (after currentIndex) worth trying as a fresh
   // URL anchor - skipping any already covered by a previously-scanned
   // anchor's neighborhood, since those are already known not to be bookable.
-  function findNextAnchorIndex(preferredTimes, currentIndex, seenTimes) {
+  // `triedAnchors` holds the raw preferred times we've already anchored on
+  // (kept raw so the "tried X -> Y" summaries stay readable); the comparison
+  // is done on snapped values, because two preferred times in the same
+  // half-hour produce the same URL and so the same page - re-anchoring on the
+  // second one is a wasted reload onto a neighbourhood we just looked at.
+  function findNextAnchorIndex(preferredTimes, currentIndex, seenTimes, triedAnchors = []) {
+    const snappedTried = new Set(triedAnchors.map(snapToAnchorIncrement));
     for (let i = currentIndex + 1; i < preferredTimes.length; i++) {
-      if (!timeAlreadySeen(preferredTimes[i], seenTimes)) return i;
+      if (timeAlreadySeen(preferredTimes[i], seenTimes)) continue;
+      if (snappedTried.has(snapToAnchorIncrement(preferredTimes[i]))) continue;
+      return i;
     }
     return null;
   }
@@ -461,6 +491,59 @@
     ];
   }
 
+  // Everything from the time-slot click onward lives under /booking/. Falling
+  // back out to any other path once a slot has been selected means we lost the
+  // slot (OpenTable bounces you to the restaurant profile when the hold fails
+  // or the table goes while you're on the details page) - see
+  // maybeRecoverFromBounce below.
+  function isInBookingFunnel() {
+    return location.pathname.startsWith('/booking/');
+  }
+
+  // Grace period before a non-funnel path counts as a bounce, so the tick
+  // that runs in the gap between clicking a time slot and the navigation
+  // actually committing doesn't get mistaken for one.
+  const BOUNCE_GRACE_MS = 3_000;
+  // Cap on how many times we'll re-enter time selection after a bounce.
+  // Without it, a restaurant that bounces every attempt would loop for the
+  // whole job budget instead of reporting a diagnosable failure.
+  const MAX_RESELECTS = 3;
+
+  // Escalation ladder for a funnel that isn't advancing. "Progress" means
+  // reaching a pathname this attempt hasn't been on yet, which is what
+  // separates a real advancing funnel from both shapes of stall seen in
+  // production: a page where nothing matches at all, and a page that keeps
+  // finding a button to click which just bounces between two paths forever
+  // (A -> B -> A). Both leave the visited-path set static, while a genuine
+  // funnel keeps adding to it.
+  const NO_PROGRESS_RELOAD_MS = 15_000;
+  const NO_PROGRESS_REANCHOR_MS = 30_000;
+  const NO_PROGRESS_ABANDON_MS = 60_000;
+
+  // Pure decision half of the ladder (the acting half is in tick()), so the
+  // thresholds are unit-testable without driving a live page.
+  //
+  // Rungs are checked highest-first, not lowest-first: a backgrounded tab gets
+  // its timers clamped to roughly once a minute by Chrome (which is exactly
+  // what stretched the observed stall reports from 10s to 60s apart in both
+  // production failures), so a tick can arrive with the whole ladder already
+  // elapsed. Checking downward means that tick abandons immediately instead of
+  // starting a reload/re-anchor sequence that needs another throttled minute
+  // per rung.
+  function nextStallAction(job, now = Date.now()) {
+    // A submitted booking may legitimately sit on a processing spinner, and
+    // reloading or re-clicking it risks double-booking - leave those to the
+    // overall job timeout instead.
+    if (job.submittedAt) return null;
+    if (job.lastProgressAt == null) return null;
+    const stalled = now - job.lastProgressAt;
+    const done = job.stallActions || [];
+    if (stalled > NO_PROGRESS_ABANDON_MS && !done.includes('abandon')) return 'abandon';
+    if (stalled > NO_PROGRESS_REANCHOR_MS && !done.includes('reanchor')) return 'reanchor';
+    if (stalled > NO_PROGRESS_RELOAD_MS && !done.includes('reload')) return 'reload';
+    return null;
+  }
+
   // ---- Job state machine ----
 
   function isExpired(job) {
@@ -473,6 +556,119 @@
     await reportStatus(job.id, status, details);
     gmSet(ACTIVE_JOB_KEY, null);
     gmSet(RECENT_KEY, { ...gmGet(RECENT_KEY, {}), [job.id]: Date.now() });
+  }
+
+  // Records the pathnames this attempt has reached. A path we haven't been on
+  // before is the progress signal the stall ladder keys off; anything else
+  // leaves lastProgressAt frozen. Only writes to GM storage when something
+  // actually changed - this runs every 150ms tick.
+  function noteProgress(job) {
+    const path = location.pathname;
+    const visited = job.visitedPaths || [];
+    if (!visited.includes(path)) {
+      job.visitedPaths = [...visited, path];
+      job.lastProgressAt = Date.now();
+      job.stallActions = [];
+      gmSet(ACTIVE_JOB_KEY, job);
+      return;
+    }
+    if (job.lastProgressAt == null) {
+      job.lastProgressAt = Date.now();
+      gmSet(ACTIVE_JOB_KEY, job);
+    }
+  }
+
+  // Drops back into time selection: clears the selected slot and the
+  // per-anchor bookkeeping so the next tick re-scans the page from scratch.
+  // seenTimes is deliberately kept - it tracks which anchors have been
+  // covered, which is still true after a bounce.
+  function resetSelection(job) {
+    job.selectedTime = null;
+    job.selectedAt = null;
+    job.anchorStartedAt = null;
+    job.reportedSlots = false;
+    job.multiDayModalTried = false;
+    job.multiDayModalOpenedAt = null;
+    multiDayModalVerified = false;
+    job.lastProgressAt = Date.now();
+    job.stallActions = [];
+  }
+
+  // A selected slot plus a path outside /booking/ means OpenTable kicked us
+  // out of the funnel - the table went while we were on the details page, or
+  // the hold failed. Before this existed, job.selectedTime stayed latched
+  // forever and the whole time-selection block was skipped, so the runner sat
+  // on the profile page clicking nothing until the 10-minute job timeout (a
+  // measured 606 seconds of dead time on Don Angie) while other slots were
+  // still bookable on the very page it was staring at.
+  async function maybeRecoverFromBounce(job) {
+    if (!job.selectedTime || isInBookingFunnel()) return false;
+    if (Date.now() - (job.selectedAt || 0) <= BOUNCE_GRACE_MS) return false;
+
+    const reselects = (job.reselectCount || 0) + 1;
+    if (reselects > MAX_RESELECTS) {
+      const summary = `bounced out of the booking funnel ${MAX_RESELECTS} times`;
+      log('action=booking-failed choice=', summary);
+      await finishJob(job, 'booking_failed', {
+        error: 'Lost the slot on the booking page repeatedly',
+        summary,
+        lostTimes: job.lostTimes,
+        finalUrl: location.href,
+      });
+      return true;
+    }
+
+    const lost = job.selectedTime;
+    job.reselectCount = reselects;
+    job.lostTimes = [...(job.lostTimes || []), lost];
+    resetSelection(job);
+    gmSet(ACTIVE_JOB_KEY, job);
+    log('action=slot-lost choice=', lost, `(attempt ${reselects}/${MAX_RESELECTS}), re-selecting`);
+    reportStatus(job.id, 'slot_lost', { lostTime: lost, attempt: reselects, path: location.pathname }); // fire-and-forget
+    return false;
+  }
+
+  // Acting half of the stall ladder (decision half is nextStallAction).
+  // Returns true only when the job has reached a terminal state.
+  async function applyStallAction(job) {
+    const action = nextStallAction(job);
+    if (!action) return false;
+
+    job.stallActions = [...(job.stallActions || []), action];
+    gmSet(ACTIVE_JOB_KEY, job);
+    const stalledMs = Date.now() - job.lastProgressAt;
+    log('action=stall choice=', action, `after ${Math.round(stalledMs / 1000)}s without progress`);
+    reportStatus(job.id, 'stage_stalled', {
+      action,
+      stalledMs,
+      path: location.pathname,
+      visitedPaths: job.visitedPaths,
+      visible: describePageState(),
+    }); // fire-and-forget
+
+    if (action === 'reload') {
+      location.reload();
+      return false;
+    }
+    if (action === 'reanchor') {
+      resetSelection(job);
+      // Keep the rung recorded through the reset above, otherwise the ladder
+      // restarts from scratch and can only ever fire 'reload' again.
+      job.stallActions = ['reload', 'reanchor'];
+      gmSet(ACTIVE_JOB_KEY, job);
+      location.href = buildOpenTableUrl(job);
+      return false;
+    }
+    const summary = `no forward progress for ${Math.round(stalledMs / 1000)}s (visited ${(job.visitedPaths || []).join(' -> ')})`;
+    log('action=booking-failed choice=', summary);
+    await finishJob(job, 'booking_failed', {
+      error: 'Stalled in the booking funnel with no forward progress',
+      summary,
+      visitedPaths: job.visitedPaths,
+      finalUrl: location.href,
+      visible: describePageState(),
+    });
+    return true;
   }
 
   let tickCount = 0;
@@ -523,6 +719,12 @@
       return true;
     }
 
+    noteProgress(job);
+    // Returns true only when it gave up (the reselect cap) - an ordinary
+    // recovery falls through into the selection block below, so the re-scan
+    // happens on this tick rather than costing another 150ms.
+    if (await maybeRecoverFromBounce(job)) return true;
+
     if (!job.selectedTime) {
       const preferredTimes = job.timeRange.preferredTimes?.length ? job.timeRange.preferredTimes : [job.timeRange.start];
       const anchorTime = preferredTimes[job.anchorIndex || 0];
@@ -532,7 +734,10 @@
       // waiting and page-load time shouldn't count against its budget.
       if (!job.anchorStartedAt) {
         job.anchorStartedAt = Date.now();
-        job.anchorsTried = [...(job.anchorsTried || []), anchorTime];
+        // Re-entering selection on the same anchor after a bounce shouldn't
+        // log it twice ("tried 17:00 -> 17:00").
+        const tried = job.anchorsTried || [];
+        job.anchorsTried = tried[tried.length - 1] === anchorTime ? tried : [...tried, anchorTime];
         job.multiDayModalTried = false;
         job.multiDayModalOpenedAt = null;
         gmSet(ACTIVE_JOB_KEY, job);
@@ -549,6 +754,7 @@
         // the next click attempt.
         reportStatus(job.id, 'slots_found', {
           anchorTime,
+          urlAnchor: snapToAnchorIncrement(anchorTime),
           slotCount: availableTimes.length,
           availableTimes: availableTimes.slice(0, 10),
           anchorsTried: job.anchorsTried,
@@ -564,6 +770,13 @@
               : `${time} worked on the first try`;
             log('action=select-time choice=', time, `(matched label "${label}")`, summary);
             job.selectedTime = time;
+            // Timestamped so maybeRecoverFromBounce can tell a real bounce
+            // from the tick that lands mid-navigation, and counted as progress
+            // so a re-selection after a bounce gets a fresh stall budget
+            // rather than inheriting the previous attempt's expired one.
+            job.selectedAt = Date.now();
+            job.lastProgressAt = Date.now();
+            job.stallActions = [];
             gmSet(ACTIVE_JOB_KEY, job);
             // Fire-and-forget - see note above.
             reportStatus(job.id, 'slot_selected', { selectedTime: time, url: location.href, anchorsTried: job.anchorsTried, summary });
@@ -620,7 +833,7 @@
       // mismatch, or timed out) - job.multiDayModalTried is false until then,
       // which keeps this block from ever firing before that resolves.
       if (Date.now() - job.anchorStartedAt > CONFIG.anchorTimeoutMs && job.multiDayModalTried) {
-        const nextIndex = findNextAnchorIndex(preferredTimes, job.anchorIndex || 0, job.seenTimes || []);
+        const nextIndex = findNextAnchorIndex(preferredTimes, job.anchorIndex || 0, job.seenTimes || [], job.anchorsTried || []);
         if (nextIndex != null) {
           job.anchorIndex = nextIndex;
           job.reportedSlots = false;
@@ -652,6 +865,12 @@
     // Best-effort every tick, cheap (two getElementById lookups) even on
     // pages where neither checkbox exists.
     checkBookingDetailsOptIns();
+
+    // Runs before the stage-click block below rather than after it, because
+    // the "nothing matched" branch there returns early - a stall where no
+    // selector matches at all (the shape that burned 10 minutes on Don
+    // Angie's profile page) would never reach a ladder placed downstream.
+    if (await applyStallAction(job)) return true;
 
     const found = findFirstVisible(selectorsForCurrentStage());
     const choice = found ? describeCandidate(found.candidate) : '(nothing matched)';
@@ -694,6 +913,10 @@
       lastStageClickKey = key;
       lastStageClickAt = now;
       simulateClick(found.el);
+      if (isFinal && !job.submittedAt) {
+        job.submittedAt = now;
+        gmSet(ACTIVE_JOB_KEY, job);
+      }
       reportStatus(job.id, isFinal ? 'booking_submitted' : 'stage_advanced', { path: location.pathname, choice }); // fire-and-forget
     }
     return false;
@@ -806,6 +1029,9 @@
       scanAvailableTimes,
       timeAlreadySeen,
       findNextAnchorIndex,
+      snapToAnchorIncrement,
+      isInBookingFunnel,
+      nextStallAction,
       isDisabled,
       describePageState,
       isInsideExcludedContainer,

@@ -286,6 +286,82 @@ test('scanAvailableTimes ignores time slots belonging to other restaurants\' car
   global.location.pathname = '/';
 });
 
+test('snapToAnchorIncrement floors a preferred time onto a 30-minute URL anchor', () => {
+  // OpenTable only honours half-hour dateTime anchors. Floor, never round -
+  // an anchor after the target time can push it out of the rendered
+  // neighbourhood (17:45 -> 18:00 would).
+  assert.equal(runner.snapToAnchorIncrement('17:15'), '17:00');
+  assert.equal(runner.snapToAnchorIncrement('17:45'), '17:30');
+  assert.equal(runner.snapToAnchorIncrement('17:00'), '17:00');
+  assert.equal(runner.snapToAnchorIncrement('19:30'), '19:30');
+  assert.equal(runner.snapToAnchorIncrement('09:05'), '09:00');
+  assert.equal(runner.snapToAnchorIncrement('garbage'), 'garbage');
+});
+
+test('buildOpenTableUrl anchors on the snapped half-hour, not the raw preferred time', () => {
+  // Regression test for the two roles preferredTimes plays: 17:15 stays the
+  // top click priority, but the URL has to ask for 17:00.
+  const url = runner.buildOpenTableUrl({
+    restaurantSlug: 'don-angie-new-york',
+    targetDate: '2026-09-10',
+    timeRange: { start: '12:00', end: '20:00', preferredTimes: ['17:15', '17:00'] },
+    partySize: 2,
+  });
+  assert.ok(url.includes('dateTime=2026-09-10%2017%3A00'), url);
+});
+
+test('findNextAnchorIndex skips candidates that snap onto an already-tried anchor', () => {
+  const preferred = ['17:00', '17:15', '17:45', '18:00'];
+  // 17:15 snaps to 17:00, which we already anchored on - it would reload the
+  // same page. 17:45 snaps to 17:30, which is genuinely new.
+  assert.equal(runner.findNextAnchorIndex(preferred, 0, [], ['17:00']), 2);
+  // With no tried-anchor history the old behaviour is unchanged.
+  assert.equal(runner.findNextAnchorIndex(preferred, 0, []), 1);
+});
+
+test('isInBookingFunnel distinguishes /booking/ pages from a bounce back out', () => {
+  global.location.pathname = '/booking/details';
+  assert.equal(runner.isInBookingFunnel(), true);
+  global.location.pathname = '/restaurant/profile/994474';
+  assert.equal(runner.isInBookingFunnel(), false);
+  global.location.pathname = '/r/don-angie-new-york';
+  assert.equal(runner.isInBookingFunnel(), false);
+  global.location.pathname = '/';
+});
+
+test('nextStallAction climbs reload -> reanchor -> abandon, once each per stall', () => {
+  const at = (secs, done = []) =>
+    runner.nextStallAction({ lastProgressAt: 0, stallActions: done }, secs * 1000);
+  assert.equal(at(10), null);
+  assert.equal(at(20), 'reload');
+  assert.equal(at(40, ['reload']), 'reanchor');
+  assert.equal(at(70, ['reload', 'reanchor']), 'abandon');
+  // Each rung fires once - a second tick at the same elapsed time is a no-op.
+  assert.equal(at(20, ['reload']), null);
+  assert.equal(at(70, ['reload', 'reanchor', 'abandon']), null);
+});
+
+test('nextStallAction jumps straight to the highest due rung on a throttled tick', () => {
+  // Chrome clamps a backgrounded tab's timers to roughly once a minute, which
+  // is what stretched the stall reports to 60s apart in both production
+  // failures. A tick arriving with the whole ladder elapsed must abandon now,
+  // not spend another throttled minute per rung.
+  assert.equal(runner.nextStallAction({ lastProgressAt: 0, stallActions: [] }, 120_000), 'abandon');
+});
+
+test('nextStallAction leaves a submitted booking alone', () => {
+  // Reloading or re-clicking a submitted reservation risks double-booking, so
+  // a processing spinner is left to the overall job timeout.
+  assert.equal(
+    runner.nextStallAction({ lastProgressAt: 0, submittedAt: 1, stallActions: [] }, 600_000),
+    null,
+  );
+});
+
+test('nextStallAction stays idle until progress has been recorded at least once', () => {
+  assert.equal(runner.nextStallAction({ stallActions: [] }, 600_000), null);
+});
+
 test('describePageState surfaces disabled/checked flags for visible interactive elements', () => {
   global.document.querySelectorAll = () => [
     {
