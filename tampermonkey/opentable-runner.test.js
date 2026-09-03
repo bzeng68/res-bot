@@ -192,14 +192,41 @@ test('isDisabled detects a disabled button or one flagged via aria-disabled', ()
   assert.equal(runner.isDisabled({ disabled: false, getAttribute: () => null }), false);
 });
 
-test('isInsideExcludedBanner flags elements inside the Chase dining-program promo banner', () => {
+test('isInsideExcludedContainer flags elements inside the Chase dining-program promo banner', () => {
   const bannerButton = { closest: (sel) => (sel.includes('chase-dining-program-banner') ? bannerButton : null) };
-  assert.equal(runner.isInsideExcludedBanner(bannerButton), true);
+  assert.equal(runner.isInsideExcludedContainer(bannerButton), true);
 });
 
-test('isInsideExcludedBanner leaves ordinary elements alone', () => {
+test('isInsideExcludedContainer leaves ordinary elements alone', () => {
   const normalButton = { closest: () => null };
-  assert.equal(runner.isInsideExcludedBanner(normalButton), false);
+  assert.equal(runner.isInsideExcludedContainer(normalButton), false);
+});
+
+test('isInsideExcludedContainer flags time slots in the no-availability "you may also like" scroller', () => {
+  // Regression test: when the restaurant has nothing bookable, OpenTable
+  // replaces its time slots with a carousel of *other* restaurants, whose
+  // cards carry genuinely clickable time-slot links. Clicking one books the
+  // wrong restaurant.
+  global.location.pathname = '/r/gyu-kaku-japanese-bbq-brookline-beacon-street';
+  const otherVenueSlot = {
+    closest: (sel) => (sel.includes('no-availability-scroller') ? otherVenueSlot : null),
+  };
+  assert.equal(runner.isInsideExcludedContainer(otherVenueSlot), true);
+});
+
+test('isInsideExcludedContainer flags restaurant-card time slots on a profile page but not on search results', () => {
+  const cardSlot = {
+    closest: (sel) => (sel.includes('restaurant-card-link') ? cardSlot : null),
+  };
+  global.location.pathname = '/market-table';
+  assert.equal(runner.isInsideExcludedContainer(cardSlot), true);
+
+  // The search fallback route (buildOpenTableUrl with no slug) has nothing
+  // *but* restaurant cards, so the exclusion has to stay off there.
+  global.location.pathname = '/search';
+  assert.equal(runner.isInsideExcludedContainer(cardSlot), false);
+
+  global.location.pathname = '/'; // leave clean for later tests
 });
 
 test('expectedCalendarDayLabel matches react-day-picker\'s day-button aria-label format', () => {
@@ -241,6 +268,22 @@ test('isInsideUnverifiedFullAvailability leaves elements outside the modal alone
   const outsideEl = { closest: () => null };
   runner.__setMultiDayModalVerifiedForTest(false);
   assert.equal(runner.isInsideUnverifiedFullAvailability(outsideEl), false);
+});
+
+test('scanAvailableTimes ignores time slots belonging to other restaurants\' cards', () => {
+  // Otherwise those times land in job.seenTimes, and findNextAnchorIndex
+  // treats a seen time as already checked here - silently skipping an anchor
+  // the runner never actually looked at.
+  const visible = { isConnected: true, getBoundingClientRect: () => ({ width: 10, height: 10 }) };
+  global.location.pathname = '/r/some-restaurant';
+  global.document.querySelectorAll = () => [
+    { ...visible, textContent: '7:00 PM', closest: () => null },
+    { ...visible, textContent: '10:30 PM', closest: (sel) => (sel.includes('restaurant-card-link') ? {} : null) },
+    { ...visible, textContent: '10:45 PM', closest: (sel) => (sel.includes('no-availability-scroller') ? {} : null) },
+    { ...visible, textContent: 'Find next available', closest: () => null },
+  ];
+  assert.deepEqual(runner.scanAvailableTimes(), ['7:00 PM']);
+  global.location.pathname = '/';
 });
 
 test('describePageState surfaces disabled/checked flags for visible interactive elements', () => {

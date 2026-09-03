@@ -147,10 +147,39 @@
   // data-test attribute rather than by matching against its wording, since a
   // future rewording (different card partner, different copy) would just as
   // easily collide again if we only excluded specific phrases.
-  const EXCLUDED_CONTAINER_SELECTOR = '[data-test="chase-dining-program-banner"]';
+  //
+  // The no-availability scroller is the "Restaurants you may also like"
+  // carousel OpenTable swaps in where the subject restaurant's own time slots
+  // would be when it has nothing bookable. Its cards carry real, clickable
+  // time-slot links for *other* restaurants (each <li data-rid> is a
+  // different venue), so without this the click-matching loop would happily
+  // book a table at whatever neighbouring restaurant happened to show a
+  // preferred time - exactly the wrong outcome, and one that looks like
+  // success from the runner's point of view.
+  const EXCLUDED_CONTAINER_SELECTOR = [
+    '[data-test="chase-dining-program-banner"]',
+    '[data-test="restaurant-profile-no-availability-scroller"]',
+    '[data-testid="restaurant-profile-no-availability-scroller"]',
+  ].join(', ');
 
-  function isInsideExcludedBanner(el) {
-    return !!el.closest?.(EXCLUDED_CONTAINER_SELECTOR);
+  // Broader net for the same class of mistake: any recommendation carousel on
+  // a restaurant profile page renders other venues as restaurant cards, and
+  // those cards' time slots are never ours to click. On the search-results
+  // fallback route (buildOpenTableUrl when no slug is known) the cards *are*
+  // the only thing on the page, so this exclusion has to stay off there.
+  const RESTAURANT_CARD_SELECTOR = '[data-test="restaurant-card-link"]';
+  const SEARCH_RESULTS_PATHS = ['/s', '/search'];
+
+  function isSearchResultsPage() {
+    return SEARCH_RESULTS_PATHS.includes((location.pathname || '').replace(/\/+$/, ''));
+  }
+
+  function isInsideOtherRestaurantCard(el) {
+    return !isSearchResultsPage() && !!el.closest?.(RESTAURANT_CARD_SELECTOR);
+  }
+
+  function isInsideExcludedContainer(el) {
+    return !!el.closest?.(EXCLUDED_CONTAINER_SELECTOR) || isInsideOtherRestaurantCard(el);
   }
 
   // Blocks the generic click-matching loop from clicking a time slot inside
@@ -185,7 +214,7 @@
   function findVisible(selector, text, exact) {
     const wanted = text != null ? normalizeText(text) : null;
     for (const el of document.querySelectorAll(selector)) {
-      if (isInsideExcludedBanner(el)) continue;
+      if (isInsideExcludedContainer(el)) continue;
       if (isInsideUnverifiedFullAvailability(el)) continue;
       if (wanted != null) {
         const t = normalizeText(el.textContent);
@@ -260,6 +289,10 @@
     const out = [];
     for (const el of document.querySelectorAll('button, a, input[type="checkbox"], input[type="radio"]')) {
       if (!isVisible(el)) continue;
+      // Excluded containers are noise here too: a 15-card recommendation
+      // carousel would otherwise consume the whole entry budget below and
+      // crowd out the elements that actually explain the stall.
+      if (isInsideExcludedContainer(el)) continue;
       const tag = el.tagName.toLowerCase();
       const text = tag === 'input' ? (el.getAttribute('aria-label') || el.name || '') : normalizeText(el.textContent);
       if (!text) continue;
@@ -326,6 +359,11 @@
   function scanAvailableTimes() {
     const times = new Set();
     for (const el of document.querySelectorAll('button, a')) {
+      // Same exclusions as findVisible - a time belonging to some other
+      // restaurant's card mustn't land in seenTimes either, since
+      // findNextAnchorIndex treats a seen time as "already checked here" and
+      // would skip an anchor we never actually looked at.
+      if (isInsideExcludedContainer(el)) continue;
       const raw = (el.textContent || '').trim();
       if (TIME_LABEL_RE.test(raw) && isVisible(el)) times.add(raw.replace(/\s+/g, ' '));
     }
@@ -765,11 +803,12 @@
       selectorsForCurrentStage,
       computeFireDelay,
       isConfirmationPage,
+      scanAvailableTimes,
       timeAlreadySeen,
       findNextAnchorIndex,
       isDisabled,
       describePageState,
-      isInsideExcludedBanner,
+      isInsideExcludedContainer,
       expectedCalendarDayLabel,
       multiDayModalShowsTargetDate,
       isInsideUnverifiedFullAvailability,
