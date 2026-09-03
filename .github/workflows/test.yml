@@ -23,4 +23,12 @@ jobs:
         run: npm install
 
       - name: Run backend tests
-        run: npm run test --workspace=backend
+        run: npm run test:backend
+
+      # Kept as its own step (rather than folded into `npm test`) so a failure
+      # here is attributable at a glance in the checks UI. The userscript suite
+      # is plain node:test with no dependencies of its own - `tampermonkey` is
+      # deliberately not an npm workspace, since `npm run build --workspaces`
+      # would then fail on it for having no build script.
+      - name: Run userscript tests
+        run: npm run test:tampermonkey

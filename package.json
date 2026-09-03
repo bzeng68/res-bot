@@ -13,6 +13,9 @@
     "dev:frontend": "npm run dev --workspace=frontend",
     "start": "concurrently -n backend,frontend --restart-tries 5 --restart-after 3000 \"npm run dev:backend\" \"npm run dev:frontend\"",
     "build": "npm run build --workspaces",
+    "test": "npm run test:backend && npm run test:tampermonkey",
+    "test:backend": "npm run test --workspace=backend",
+    "test:tampermonkey": "npm run test --prefix tampermonkey",
     "install:all": "npm install"
   },
   "devDependencies": {
