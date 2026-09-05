@@ -26,7 +26,17 @@
     cooldownMs: 60_000,
     jobTimeoutMs: 10 * 60_000,
     tickMs: 150,
+    // Grace period AFTER an anchor's slots have rendered, before declaring it
+    // exhausted. Short on purpose: the matching loop has already tried every
+    // preferred time against those slots, so this only buys a little room for
+    // lazily-added ones.
     anchorTimeoutMs: 1_500,
+    // Budget for an anchor whose slots haven't rendered at all yet. This has
+    // to be much larger than anchorTimeoutMs: measured render times on a
+    // release-morning page have been as slow as 6.4s, and treating "hasn't
+    // loaded" as "nothing available" swept all 10 anchors of a live job in 24
+    // seconds without ever seeing a single slot.
+    anchorLoadTimeoutMs: 9_000,
   };
 
   const ACTIVE_JOB_KEY = 'otr_activeJob';
@@ -401,6 +411,19 @@
     return seenTimes.some((seen) => labels.includes(normalizeText(seen)));
   }
 
+  // True once this anchor has had a fair chance and come up empty. Two very
+  // different waits are involved and conflating them is what made a live job
+  // sweep all ten of its anchors in 24 seconds while reporting zero slots
+  // found: before anything time-shaped has rendered we're waiting on the
+  // page (anchorLoadTimeoutMs), and only afterwards are we waiting to see if
+  // more slots trickle in (anchorTimeoutMs, measured from the render, not
+  // from navigation).
+  function isAnchorExhausted(job, config, now = Date.now()) {
+    if (job.anchorStartedAt == null) return false;
+    if (job.anchorSlotsSeenAt != null) return now - job.anchorSlotsSeenAt > config.anchorTimeoutMs;
+    return now - job.anchorStartedAt > config.anchorLoadTimeoutMs;
+  }
+
   // Next preferred-time index (after currentIndex) worth trying as a fresh
   // URL anchor - skipping any already covered by a previously-scanned
   // anchor's neighborhood, since those are already known not to be bookable.
@@ -452,6 +475,17 @@
     const selectedDay = document.querySelector(`${MULTI_DAY_CALENDAR_SELECTOR} button[aria-pressed="true"]`);
     if (!selectedDay) return false;
     return normalizeText(selectedDay.getAttribute('aria-label') || '') === normalizeText(expectedCalendarDayLabel(targetDate));
+  }
+
+  // Once the full-day modal is open and its date verified, the sweep must not
+  // yank us off the page before its slot list has rendered and been scanned.
+  // In a live job the modal was verified and then abandoned 255ms later,
+  // giving the matching loop a single 150ms tick to find anything in it.
+  const MULTI_DAY_SCAN_MS = 4_000;
+
+  function multiDayModalScanPending(job, now = Date.now()) {
+    if (!job.multiDayVerifiedAt) return false;
+    return now - job.multiDayVerifiedAt < MULTI_DAY_SCAN_MS;
   }
 
   function isConfirmationPage() {
@@ -647,6 +681,8 @@
     }); // fire-and-forget
 
     if (action === 'reload') {
+      job.navPendingUntil = Date.now() + NAV_SETTLE_MS;
+      gmSet(ACTIVE_JOB_KEY, job);
       location.reload();
       return false;
     }
@@ -655,6 +691,7 @@
       // Keep the rung recorded through the reset above, otherwise the ladder
       // restarts from scratch and can only ever fire 'reload' again.
       job.stallActions = ['reload', 'reanchor'];
+      job.navPendingUntil = Date.now() + NAV_SETTLE_MS;
       gmSet(ACTIVE_JOB_KEY, job);
       location.href = buildOpenTableUrl(job);
       return false;
@@ -686,10 +723,19 @@
   const STUCK_REPORT_INTERVAL_MS = 10000;
   let lastStuckReportAt = 0;
 
+  // How long to treat a just-issued navigation as in flight. Ticks during
+  // this window skip the whole body rather than acting on the outgoing page.
+  const NAV_SETTLE_MS = 2_000;
+
   // One tick of the loop: check URL/page state, click whatever's relevant,
   // return true when the job has reached a terminal state.
   async function tick(job) {
     tickCount++;
+
+    // A navigation we issued ourselves is still in flight - anything we
+    // clicked or measured right now would belong to the document we're
+    // leaving.
+    if (job.navPendingUntil && Date.now() < job.navPendingUntil) return false;
 
     // Pre-navigated ahead of the fire time: just wait (cheaply - skip the
     // rest of the tick entirely) until it arrives, then reload right at T=0
@@ -740,10 +786,19 @@
         job.anchorsTried = tried[tried.length - 1] === anchorTime ? tried : [...tried, anchorTime];
         job.multiDayModalTried = false;
         job.multiDayModalOpenedAt = null;
+        job.anchorSlotsSeenAt = null;
+        job.multiDayVerifiedAt = null;
         gmSet(ACTIVE_JOB_KEY, job);
       }
 
       const availableTimes = scanAvailableTimes();
+      // First tick on which this anchor has actually rendered something
+      // time-shaped. Until that happens the page is still loading, and its
+      // emptiness says nothing about availability.
+      if (availableTimes.length && !job.anchorSlotsSeenAt) {
+        job.anchorSlotsSeenAt = Date.now();
+        gmSet(ACTIVE_JOB_KEY, job);
+      }
       if (availableTimes.length && !job.reportedSlots) {
         job.reportedSlots = true;
         job.seenTimes = Array.from(new Set([...(job.seenTimes || []), ...availableTimes]));
@@ -790,7 +845,7 @@
       // availability" before resorting to the reload-based sweep below - it
       // covers the whole day in one click instead of one page load per
       // anchor tried.
-      if (Date.now() - job.anchorStartedAt > CONFIG.anchorTimeoutMs && !job.multiDayModalTried) {
+      if (isAnchorExhausted(job, CONFIG) && !job.multiDayModalTried) {
         if (!job.multiDayModalOpenedAt) {
           const opened = clickFirstVisible([{ selector: MULTI_DAY_BUTTON_SELECTOR }]);
           if (!opened) {
@@ -808,6 +863,8 @@
           gmSet(ACTIVE_JOB_KEY, job);
           if (multiDayModalShowsTargetDate(job.targetDate)) {
             multiDayModalVerified = true;
+            job.multiDayVerifiedAt = Date.now();
+            gmSet(ACTIVE_JOB_KEY, job);
             log('action=full-availability-opened choice=', job.targetDate);
             reportStatus(job.id, 'full_availability_opened', { targetDate: job.targetDate }); // fire-and-forget
             return false; // next tick's matching loop above will find its slots
@@ -832,12 +889,21 @@
       // above has been tried and ruled out for this attempt (absent, date
       // mismatch, or timed out) - job.multiDayModalTried is false until then,
       // which keeps this block from ever firing before that resolves.
-      if (Date.now() - job.anchorStartedAt > CONFIG.anchorTimeoutMs && job.multiDayModalTried) {
+      if (isAnchorExhausted(job, CONFIG) && !multiDayModalScanPending(job) && job.multiDayModalTried) {
         const nextIndex = findNextAnchorIndex(preferredTimes, job.anchorIndex || 0, job.seenTimes || [], job.anchorsTried || []);
         if (nextIndex != null) {
           job.anchorIndex = nextIndex;
           job.reportedSlots = false;
           job.anchorStartedAt = null;
+          // location.href doesn't stop the current page: ticks keep running
+          // until the new document commits, and each one re-entered this
+          // block and re-navigated (the live run logged 5 duplicate
+          // re-anchors). Blanking anchorStartedAt alone isn't enough, since
+          // the very next tick just re-initialises it and the anchor is
+          // instantly "exhausted" again on the stale page. Set before the
+          // gmSet below - runLoop re-reads the job from storage every tick,
+          // so an in-memory-only flag would be dropped on the next one.
+          job.navPendingUntil = Date.now() + NAV_SETTLE_MS;
           gmSet(ACTIVE_JOB_KEY, job);
           const url = buildOpenTableUrl(job);
           log('action=re-anchor choice=', preferredTimes[nextIndex], url);
@@ -1030,6 +1096,8 @@
       timeAlreadySeen,
       findNextAnchorIndex,
       snapToAnchorIncrement,
+      isAnchorExhausted,
+      multiDayModalScanPending,
       isInBookingFunnel,
       nextStallAction,
       isDisabled,

@@ -362,6 +362,40 @@ test('nextStallAction stays idle until progress has been recorded at least once'
   assert.equal(runner.nextStallAction({ stallActions: [] }, 600_000), null);
 });
 
+test('isAnchorExhausted waits out page load when nothing has rendered yet', () => {
+  // Regression test for the live failure that swept all 10 anchors of a real
+  // job in 24 seconds and reported zero slots found at every one: an anchor
+  // with no time-shaped element on screen yet is still loading, and its
+  // emptiness says nothing about availability.
+  const cfg = { anchorTimeoutMs: 1_500, anchorLoadTimeoutMs: 9_000 };
+  const job = { anchorStartedAt: 0, anchorSlotsSeenAt: null };
+  assert.equal(runner.isAnchorExhausted(job, cfg, 2_000), false, 'at 2s (old timeout) still loading');
+  assert.equal(runner.isAnchorExhausted(job, cfg, 6_400), false, 'at 6.4s (measured render time) still loading');
+  assert.equal(runner.isAnchorExhausted(job, cfg, 9_500), true, 'gives up past the load budget');
+});
+
+test('isAnchorExhausted measures the post-render grace from the render, not the navigation', () => {
+  const cfg = { anchorTimeoutMs: 1_500, anchorLoadTimeoutMs: 9_000 };
+  const job = { anchorStartedAt: 0, anchorSlotsSeenAt: 6_000 };
+  assert.equal(runner.isAnchorExhausted(job, cfg, 7_000), false, '1s after render');
+  assert.equal(runner.isAnchorExhausted(job, cfg, 7_600), true, '1.6s after render');
+});
+
+test('isAnchorExhausted is false before an anchor has started', () => {
+  assert.equal(
+    runner.isAnchorExhausted({}, { anchorTimeoutMs: 1_500, anchorLoadTimeoutMs: 9_000 }, 1e9),
+    false,
+  );
+});
+
+test('multiDayModalScanPending holds the sweep off a just-verified full-day modal', () => {
+  // The live run verified the modal and abandoned it 255ms later, giving the
+  // matching loop one 150ms tick to scan the whole day's slots.
+  assert.equal(runner.multiDayModalScanPending({ multiDayVerifiedAt: 1_000 }, 1_255), true);
+  assert.equal(runner.multiDayModalScanPending({ multiDayVerifiedAt: 1_000 }, 6_000), false);
+  assert.equal(runner.multiDayModalScanPending({}, 1e9), false);
+});
+
 test('describePageState surfaces disabled/checked flags for visible interactive elements', () => {
   global.document.querySelectorAll = () => [
     {
