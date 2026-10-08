@@ -13,6 +13,7 @@ import {
   deleteReservation,
 } from '../database.js';
 import { stopJobForReservation } from '../scheduler/index.js';
+import { getFireTime } from '../scheduler/pipeline.js';
 import { resyClient } from '../api/resy-client.js';
 import { wss } from '../ws.js';
 import { isCloudTasksEnabled, enqueueBookingTask, cancelBookingTask } from '../utils/tasksQueue.js';
@@ -85,15 +86,13 @@ router.post('/', async (req, res) => {
     let scheduledPollTime: string;
     
     if (reservationData.bookingWindow) {
-      const { daysInAdvance, releaseTime, timezone: tz } = reservationData.bookingWindow;
-      const [hours, minutes] = releaseTime.split(':').map(Number);
-      
-      const bookingOpensAt = dayjs.tz(reservationData.targetDate, tz)
-        .subtract(daysInAdvance, 'days')
-        .hour(hours)
-        .minute(minutes)
-        .second(0)
-        .millisecond(0); // exact window-open time — matches getFireTime()
+      // Single source of truth with the worker — a second copy of this math
+      // here is exactly how the control plane and the worker drifted an hour
+      // apart across a DST boundary.
+      const bookingOpensAt = getFireTime({
+        targetDate: reservationData.targetDate,
+        bookingWindow: reservationData.bookingWindow,
+      } as ReservationRequest);
       
       if (now.isAfter(bookingOpensAt)) {
         scheduledPollTime = now.toISOString();

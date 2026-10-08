@@ -304,18 +304,43 @@ function logAttempt(
   }).catch(err => console.error('Failed to log booking attempt:', err));
 }
 
+// Resy exposes the seating area as `slot.config.type`, a free-text label that
+// varies per venue — observed indoor values include "Dining Room", "Dining"
+// and "Table", so an indoor allow-list would silently reject valid inventory.
+// Excluding the outdoor labels instead keeps unknown/new indoor labels bookable.
+const OUTDOOR_TABLE_TYPE = /outdoor|patio|terrace|garden|sidewalk|rooftop|roof deck|al fresco|courtyard|backyard/i;
+
+/**
+ * True when a slot is outdoor seating.
+ *
+ * `config.type` is the normal source. The slot token embeds the same label as
+ * its trailing segment (`rgs://resy/2567/.../18:30:00/2/Outdoor`), so it costs
+ * nothing to check as a fallback for venues that omit `config.type`.
+ */
+export function isOutdoorSlot(slot: AvailableSlot): boolean {
+  if (OUTDOOR_TABLE_TYPE.test(slot.tableType ?? '')) return true;
+  return OUTDOOR_TABLE_TYPE.test(slot.slotId.split('/').pop() ?? '');
+}
+
 export function findBestSlot(
   slots: AvailableSlot[],
   startTime: string,
   endTime: string,
   preferredTimes?: string[],
   excludeSlotIds?: Set<string>,
+  excludeOutdoor = true,
 ): AvailableSlot | null {
   const startMin = timeToMinutes(startTime);
   const endMin = timeToMinutes(endTime);
 
+  // Outdoor is filtered out HERE, with the other hard constraints, rather than
+  // as a ranking preference below. Every selection path reads from `valid`, so
+  // this is the only place that covers all of them at once — in particular the
+  // preferred-time loop, which matches on time alone and would otherwise return
+  // an outdoor table whenever one happens to come first in Resy's ordering.
   const valid = slots.filter(s => {
     if (excludeSlotIds?.has(s.slotId)) return false;
+    if (excludeOutdoor && isOutdoorSlot(s)) return false;
     const m = timeToMinutes(s.time);
     return m >= startMin && m <= endMin;
   });

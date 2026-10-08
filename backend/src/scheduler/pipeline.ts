@@ -42,19 +42,31 @@ const PREWARM_AFTER_WINDOW_MS = 500;
 // 3500ms gives ~700ms of headroom for the prewarm to beat the fallback.
 const FALLBACK_FIRE_MS = 3500;
 
-/** Computes the exact moment at which a booking attempt should fire. */
+/**
+ * Computes the exact moment at which a booking attempt should fire.
+ *
+ * The date arithmetic deliberately runs on the plain calendar date in UTC,
+ * and the zone offset is resolved only afterwards, against the *fire* date.
+ * Anchoring to the target date first (`dayjs.tz(targetDate, tz).subtract(...)`)
+ * pins the object to the target date's offset and then leans on dayjs's
+ * local-time hour setters — so a reservation spanning a DST boundary
+ * resolved an hour off, and did so differently depending on the host's own
+ * timezone (correct on an America/New_York laptop, an hour late on a UTC
+ * Cloud Run container).
+ */
 export function getFireTime(reservation: ReservationRequest): dayjs.Dayjs {
   if (!reservation.bookingWindow) return dayjs(); // open now
 
   const { daysInAdvance, releaseTime, timezone: tz } = reservation.bookingWindow;
-  const [hours, minutes] = releaseTime.split(':').map(Number);
 
-  return dayjs.tz(reservation.targetDate, tz)
+  // Whole-day math on a zone-less calendar date: no offset to inherit.
+  const fireDate = dayjs
+    .utc(reservation.targetDate)
     .subtract(daysInAdvance, 'days')
-    .hour(hours)
-    .minute(minutes)
-    .second(0)
-    .millisecond(0); // exact moment the booking window opens
+    .format('YYYY-MM-DD');
+
+  // Offset resolved on the fire date, in the restaurant's zone.
+  return dayjs.tz(`${fireDate} ${releaseTime}`, tz).second(0).millisecond(0);
 }
 
 /** Broadcasts a status update. Defaults to the control plane's own WS clients

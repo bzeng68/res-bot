@@ -47,7 +47,7 @@ function makeAxiosError(status: number, body: object = {}) {
 
 describe('poller', () => {
   let poller: any;
-  let findBestSlot: (slots: AvailableSlot[], start: string, end: string, preferred?: string[], excludeSlotIds?: Set<string>) => AvailableSlot | null;
+  let findBestSlot: (slots: AvailableSlot[], start: string, end: string, preferred?: string[], excludeSlotIds?: Set<string>, excludeOutdoor?: boolean) => AvailableSlot | null;
 
   before(async () => {
     // Load only the bits we need; stub out all I/O-touching dependencies.
@@ -167,6 +167,74 @@ describe('poller', () => {
       ];
       const result = findBestSlot(slots, '18:00', '21:00');
       assert.equal(result?.slotId, 'slot-A');
+    });
+
+    // -----------------------------------------------------------------------
+    // Outdoor exclusion. Regression: Via Carota booked
+    // .../18:30:00/2/Outdoor twice because the preferred-time loop matches on
+    // time alone and took whichever slot Resy happened to return first.
+    // -----------------------------------------------------------------------
+
+    it('does not take an outdoor table at a preferred time when an indoor one exists', () => {
+      const slots = [
+        makeSlot('18:30', 'slot-outdoor', 'Outdoor'),   // first in Resy's order
+        makeSlot('18:30', 'slot-indoor', 'Dining Room'),
+      ];
+      const result = findBestSlot(slots, '17:00', '20:00', ['18:00', '17:30', '18:30']);
+      assert.equal(result?.slotId, 'slot-indoor');
+    });
+
+    it('skips to the next preferred time when the only slot at the best one is outdoor', () => {
+      const slots = [
+        makeSlot('18:00', 'slot-outdoor', 'Outdoor'),
+        makeSlot('19:00', 'slot-indoor', 'Dining Room'),
+      ];
+      const result = findBestSlot(slots, '17:00', '20:00', ['18:00', '19:00']);
+      assert.equal(result?.slotId, 'slot-indoor');
+    });
+
+    it('returns null rather than booking outdoors when every slot is outdoor', () => {
+      const slots = [
+        makeSlot('18:00', 'slot-A', 'Outdoor'),
+        makeSlot('19:00', 'slot-B', 'Patio'),
+        makeSlot('19:30', 'slot-C', 'Rooftop'),
+      ];
+      assert.isNull(findBestSlot(slots, '17:00', '20:00', ['18:00', '19:00']));
+      assert.isNull(findBestSlot(slots, '17:00', '20:00'));
+    });
+
+    it('keeps indoor seating whose label is not "Dining Room"', () => {
+      // The Coop books "Table", Tonino books "Dining" — an indoor allow-list
+      // would have silently rejected both.
+      for (const label of ['Table', 'Dining', 'Bar', 'Counter', 'Chef\'s Table']) {
+        const slots = [makeSlot('19:00', 'slot-indoor', label)];
+        const result = findBestSlot(slots, '17:00', '20:00', ['19:00']);
+        assert.equal(result?.slotId, 'slot-indoor', `"${label}" should remain bookable`);
+      }
+    });
+
+    it('detects outdoor from the slot token when tableType is missing', () => {
+      const slots: AvailableSlot[] = [
+        { time: '18:30', date: '2026-11-06', partySize: 2, slotId: 'rgs://resy/2567/3023097/2/2026-11-06/2026-11-06/18:30:00/2/Outdoor' },
+        { time: '19:00', date: '2026-11-06', partySize: 2, slotId: 'rgs://resy/2567/3023097/2/2026-11-06/2026-11-06/19:00:00/2/Dining Room' },
+      ];
+      const result = findBestSlot(slots, '17:00', '20:00', ['18:30', '19:00']);
+      assert.include(result?.slotId, 'Dining Room');
+    });
+
+    it('matches the common outdoor synonyms, case-insensitively', () => {
+      for (const label of ['Outdoor', 'outdoor patio', 'Patio', 'Terrace', 'Garden',
+                           'Sidewalk', 'Rooftop', 'Roof Deck', 'Al Fresco', 'Courtyard', 'Backyard']) {
+        const slots = [makeSlot('19:00', 'slot-out', label)];
+        assert.isNull(findBestSlot(slots, '17:00', '20:00', ['19:00']), `"${label}" should be excluded`);
+      }
+    });
+
+    it('still allows outdoor when excludeOutdoor is explicitly false', () => {
+      const slots = [makeSlot('19:00', 'slot-out', 'Outdoor')];
+      assert.isNull(findBestSlot(slots, '17:00', '20:00', ['19:00']));
+      const result = findBestSlot(slots, '17:00', '20:00', ['19:00'], undefined, false);
+      assert.equal(result?.slotId, 'slot-out');
     });
   });
 

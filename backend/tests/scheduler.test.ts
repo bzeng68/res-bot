@@ -143,6 +143,65 @@ describe('scheduler', () => {
 
       assert.closeTo(msUntilFire, 5 * 60 * 1000, 500, 'delay should be ~5 minutes exactly');
     });
+
+    // ---------------------------------------------------------------------
+    // DST. The offset must be resolved on the *fire* date, not the target
+    // date — these two can straddle a transition, since they're up to a
+    // month apart. Regression: The Four Horsemen (2026-10-04) fired an hour
+    // late because the window was computed at the target date's EST offset.
+    // ---------------------------------------------------------------------
+
+    it('resolves the offset on the fire date when the target date is past the fall-back transition', () => {
+      // target 2026-11-02 is EST (-05:00); fire date 2026-10-04 is still EDT
+      // (-04:00). 07:00 EDT = 11:00Z — NOT 12:00Z.
+      const reservation = makeReservation({
+        targetDate: '2026-11-02',
+        bookingWindow: { daysInAdvance: 29, releaseTime: '07:00', timezone: 'America/New_York' },
+      });
+
+      assert.strictEqual(
+        scheduler.getFireTime(reservation).toISOString(),
+        '2026-10-04T11:00:00.000Z'
+      );
+    });
+
+    it('resolves the offset on the fire date when the target date is past the spring-forward transition', () => {
+      // target 2027-04-05 is EDT (-04:00); fire date 2027-03-07 is still EST
+      // (-05:00). 07:00 EST = 12:00Z.
+      const reservation = makeReservation({
+        targetDate: '2027-04-05',
+        bookingWindow: { daysInAdvance: 29, releaseTime: '07:00', timezone: 'America/New_York' },
+      });
+
+      assert.strictEqual(
+        scheduler.getFireTime(reservation).toISOString(),
+        '2027-03-07T12:00:00.000Z'
+      );
+    });
+
+    it('is independent of the host timezone', () => {
+      // The laptop that creates a reservation (America/New_York) and the Cloud
+      // Run container that fires it (UTC) must agree to the millisecond.
+      const reservation = makeReservation({
+        targetDate: '2026-11-02',
+        bookingWindow: { daysInAdvance: 29, releaseTime: '07:00', timezone: 'America/New_York' },
+      });
+
+      const originalTZ = process.env.TZ;
+      try {
+        const results = ['America/New_York', 'UTC', 'Asia/Tokyo', 'Pacific/Auckland'].map(tz => {
+          process.env.TZ = tz;
+          return [tz, scheduler.getFireTime(reservation).toISOString()] as const;
+        });
+
+        for (const [tz, iso] of results) {
+          assert.strictEqual(iso, '2026-10-04T11:00:00.000Z', `wrong fire time under TZ=${tz}`);
+        }
+      } finally {
+        if (originalTZ === undefined) delete process.env.TZ;
+        else process.env.TZ = originalTZ;
+      }
+    });
   });
 
   // -------------------------------------------------------------------------

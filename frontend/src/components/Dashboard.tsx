@@ -103,11 +103,20 @@ export default function Dashboard({ refreshTrigger }: Props) {
 
   const handleSaveEdit = async (id: string) => {
     try {
+      // Preserve the existing priority list — PATCH replaces timeRange
+      // wholesale, so sending [] here silently wiped the user's preferred
+      // times every time they nudged the start/end of an existing booking.
+      // Drop any preference that the new range no longer covers.
+      const current = reservations.find(r => r.id === id);
+      const preferredTimes = (current?.timeRange.preferredTimes ?? []).filter(
+        t => t >= editStart && t <= editEnd
+      );
+
       await updateReservation(id, {
         timeRange: {
           start: editStart,
           end: editEnd,
-          preferredTimes: [],
+          preferredTimes,
         },
       });
       setEditingId(null);
